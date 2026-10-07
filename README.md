@@ -1,5 +1,25 @@
 # jbaruch/nanoclaw-travel
 
+## Viktor's local configuration
+
+Viktor uses **TripIt, Flighty, Reclaim, and ExpertFlyer**. This customized pack
+includes his [Flighty skill](https://github.com/gAmUssA/flighty-skill), pinned at
+`1ac03226bca727ec3b791685751d16767f630842`. The CLI and its MIT license are
+bundled under `skills/flighty`; NanoClaw reads a consistent SQLite snapshot through
+a read-only mount in the main swarm. The host LaunchAgent
+`com.nanoclaw.flighty-export` checks for changes every minute; snapshot freshness
+is recorded beside the database. Flighty provides cached local data, not a
+live polling service.
+
+The upstream byAir automation described below remains available as source,
+but is disabled in Viktor's installation. Installing Flighty does not adapt
+those byAir-specific scripts. TripIt/Reclaim/ExpertFlyer each need their own
+account connection. All four connections were verified on 2026-10-07.
+Reclaim travel-timezone sync runs hourly; calendar flight/OOO blocks remain off. Viktor prefers an aisle when solo and a same-row 3+1 across the aisle with family.
+`pretrip-brief` checks every 15 minutes and sends once 24 hours before the first
+departure, with catch-up before departure after sleep. Host connection monitoring
+runs every 30 minutes with failure/recovery alerts; healthy checks stay silent.
+
 [![tessl](https://img.shields.io/endpoint?url=https%3A%2F%2Fapi.tessl.io%2Fv1%2Fbadges%2Fjbaruch%2Fnanoclaw-travel)](https://tessl.io/registry/jbaruch/nanoclaw-travel)
 
 Actionable travel assistance for NanoClaw — byAir-powered flight notifications, travel-booking gap checks, and nightly TripIt sync. Replaces generic "21 minutes to departure" reminders with alerts that change behavior. Powered by [byAir](https://byairapp.com/mcp/) for flight data and Google Maps Distance Matrix for traffic-aware time-to-leave.
@@ -69,13 +89,15 @@ Travel history is the same story. **`jbaruch/tripit-api`** ships the `using-trip
 
 | Rule | Summary |
 |------|---------|
-| [flight-data-locality](rules/flight-data-locality.md) | byAir is the single upstream for flight data; AeroAPI / Flighty / airline-specific APIs forbidden. Travel already booked or flown (past trips, PNRs, costs) comes from `jbaruch/tripit-api`, never from hand-parsing the iCal feed |
+| [flight-data-locality](rules/flight-data-locality.md) | Viktor uses Flighty for cached flight data, TripIt for booked itineraries, and ExpertFlyer for availability; Reclaim changes require his chosen automation scope. byAir polling is disabled |
 | [operator-local-tz-phrasing](rules/operator-local-tz-phrasing.md) | Relative-date words ("today"/"tomorrow") in a surface are phrased against the operator's local date (via `read-current-tz.py`), not the container UTC clock; displayed airport clock times stay as-is |
 
 ## Skills
 
 | Skill | Description |
 |-------|-------------|
+| [flighty](skills/flighty/SKILL.md) | Read Viktor's cached Flighty flights, seats, connections, and statistics from the host snapshot. |
+| [reclaim-travel](skills/reclaim-travel/SKILL.md) | Read Reclaim settings, preview TripIt timezone segments, and inspect the hourly timezone-only sync. |
 | [travel-core](skills/travel-core/SKILL.md) | Shared library bundle (not user-invocable): hosts the cross-skill `trip_origin` (TripIt-over-home position/anchor resolution), `airport_lead` (clearance / post-arrival buffer policy), `trip_key` (the canonical per-trip identifier joining the travel DB to the drive engine's verdicts), `lodging` (the `Check-in:` / `Check-out:` discriminator), and `addresses` (the read-only parse of the trusted profile's canonical `## Addresses` block) modules so the other skills import one source of truth. |
 | [drive-engine](skills/drive-engine/SKILL.md) | Unified leg-based drive-block engine (#156). On a ~30-min sweep it plans airport drives from the byAir itinerary and meeting drives from the calendar, diffs both against the primary calendar, and **applies** the changes — creating / updating / deleting its own blocks. Suppresses drives that can't be made (connection airports, home meetings while travelling), renders in local time, and leaves legacy blocks for the operator. Also plans the getting-there legs of a trip you drive to rather than fly — home→hotel and back — deciding by the computed drive time and asking once when that is ambiguous (#231). Notifies the operator ONLY on a new meeting drive (which they can skip by replying "skip", enumerated by local index), a material (≥10%) drive-time change ("leave N min sooner/later"), or a drive-or-fly question (answered "drive" / "fly"); removes, airport-drive adds, lodging-drive adds, and routine re-times apply silently. Replaces the flight-assist airport-drive pass and drive-planner. |
 | [flight-assist](skills/flight-assist/SKILL.md) | Action router: diagnose credentials, set home base, or compose a user-facing notification from a precheck wake event (delay, gate change, cancellation, boarding, time-to-leave, carousel, day-before, arrival logistics, tracked-flight add/remove) |

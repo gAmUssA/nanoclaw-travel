@@ -1,7 +1,7 @@
 {
   "name": "jbaruch/nanoclaw-travel",
-  "version": "0.2.129",
-  "description": "Travel assistant for NanoClaw: byAir flight notifications (delay, gate, connection risk, inbound aircraft delay, time-to-leave, arrival logistics), traffic-aware drive planning for in-person meetings (auto drive blocks + leave-by traffic rechecks), travel-booking gap checks, and nightly TripIt sync. Per-chat overlay plugin.",
+  "version": "0.2.133",
+  "description": "Viktor\u2019s travel pack: local Flighty cached flight queries, TripIt booking checks, Reclaim integration, and ExpertFlyer seat/inventory tools. Provider-dependent automation requires configured accounts.",
   "private": false,
   "skills": [
     "skills/travel-core",
@@ -10,7 +10,10 @@
     "skills/sync-tripit",
     "skills/check-travel-bookings",
     "skills/nightly-travel-sync",
-    "skills/expertflyer"
+    "skills/expertflyer",
+    "skills/flighty",
+    "skills/reclaim-travel",
+    "skills/pretrip-brief"
   ],
   "rules": [
     "rules/flight-data-locality.md",

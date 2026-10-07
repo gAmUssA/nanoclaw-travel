@@ -86,7 +86,7 @@ Relay the script's `location` and `reason` verbatim. When both blocks are presen
 
 ## Step 4 — Update snooze state
 
-Only run this step when Baruch snoozes or resolves a trip. Invoke the bundled mutation script; do not hand-edit `/workspace/group/travel-booking-state.json` directly. The slug-to-trip fuzzy-match (e.g., "snooze JNation" → `jnation-2026-05`) stays in the agent's hands per `coding-policy: script-delegation`; the script handles the deterministic JSON mutation.
+Only run this step when Viktor snoozes or resolves a trip. Invoke the bundled mutation script; do not hand-edit `/workspace/group/travel-booking-state.json` directly. The slug-to-trip fuzzy-match (e.g., "snooze JNation" → `jnation-2026-05`) stays in the agent's hands per `coding-policy: script-delegation`; the script handles the deterministic JSON mutation.
 
 ```bash
 # Snooze a trip until a future date

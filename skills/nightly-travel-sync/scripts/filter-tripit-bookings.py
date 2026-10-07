@@ -22,7 +22,7 @@ Match rule:
 import json
 import sys
 
-PREFIX = "Baruch, check out your TripIt itinerary for Fwd:"
+PREFIX = "Viktor, check out your TripIt itinerary for Fwd:"
 
 
 def main():

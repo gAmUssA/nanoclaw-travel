@@ -19,7 +19,7 @@ from datetime import datetime, timedelta, timezone
 
 SCHEDULE_PATH = pathlib.Path("/workspace/group/travel-schedule.json")
 STALE_THRESHOLD_DAYS = 7
-SUBJECT_PREFIX = "Baruch, check out your TripIt itinerary for Fwd:"
+SUBJECT_PREFIX = "Viktor, check out your TripIt itinerary for Fwd:"
 
 
 def main():

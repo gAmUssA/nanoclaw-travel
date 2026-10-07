@@ -2,34 +2,42 @@
 alwaysApply: true
 ---
 
-# Flight Data Locality
+# Viktor's Travel Data Sources
 
-## Single Upstream
+## Flighty
 
-- byAir is the source of truth for flight status, gate, delay, baggage carousel, and inbound aircraft chain
-- A second flight-data API is forbidden. AeroAPI, Flighty, FlightAware direct, and airline-specific APIs do not enter the plugin
-- Missing fields are reported upstream or descoped. A second API is not the remedy
+- Viktor uses Flighty. Invoke `tessl__flighty` for his flights, cached status,
+  delay forecasts, seats, connections, and flight statistics.
+- The skill reads a host-exported Flighty SQLite snapshot through a read-only mount available
+  in the main swarm. It makes no live flight-data request. State this freshness
+  limit when presenting time-sensitive status; unavailable fields stay unknown.
+- Use the bundled CLI rather than generating SQL. Default to Viktor's flights;
+  query friends only when requested. Never write to the mounted database.
+- Do not substitute byAir, buy an API subscription, or treat gateway placeholder
+  credentials as an account connection. Viktor has not configured byAir.
+- The bundled byAir `flight-assist` / `sync-tripit` polling pipeline and
+  `drive-engine` remain disabled. Flighty lookup does not make those scripts
+  Flighty-compatible or provide continuous live alerts.
 
-## Out of Scope
+## TripIt, Reclaim, and ExpertFlyer
 
-- Maps and traffic data live on a separate axis. Google Maps Distance Matrix is the source for time-to-leave
-- Calendar and TripIt are the source-of-record for which flights exist
-- byAir is the source-of-record for what those flights are doing now
+- TripIt is the itinerary source for hotels, reservations, and trip plans when
+  Viktor's connection is configured. Its private iCal feed can populate the
+  upcoming travel schedule. Full history and confirmation-number lookups require
+  a configured TripIt API service; do not invent results from a missing service.
+- Flighty's own flight history and statistics are available independently;
+  identify the source rather than claiming they represent all TripIt bookings.
+- Reclaim calendar/timezone changes require Viktor's connected account and his
+  selected automation scope. Onboarding alone does not enable calendar writes.
+- ExpertFlyer provides seat and inventory lookups when its service is connected.
+  Get the held seat from the matching Flighty record or Viktor. Viktor prefers aisle when solo and a verified 3+1 across-aisle group with
+  family. Use the family-seats command for family trips; never split the group
+  using solo ranking. No exit-row/front-row preference has been stated.
+- Do not enable jobs whose provider connections have not passed a real access
+  check. `onecli-managed` is a placeholder, not proof of authentication.
 
-## Travel Already Booked or Flown
+## Maps and Calendar
 
-- `jbaruch/tripit-api` is the source-of-record for travel history: past trips, lodging stays, confirmation numbers, costs, loyalty balances
-- Its `using-tripit` skill reaches the service over `TRIPIT_API_URL` / `TRIPIT_API_TOKEN`
-- The plugin loads as a co-loaded overlay tile
-- The plugin is never vendored here
-- The TripIt iCal feed carries a rolling ~90-day window and no confirmation numbers
-- The feed stays the input to `travel-schedule.json` and `travel-db.json` for upcoming travel
-- Route a history question to `using-tripit`, never to a hand-parsed `.ics`
-- A second history source is forbidden on the same terms as a second flight-data API
-
-## How to Apply
-
-- New flight-data integration request starts with: "does byAir already expose this?"
-- A PR adding a second flight upstream is `REQUEST_CHANGES` by default
-- The PR description must name the specific byAir gap that justifies the addition
-- Existing surfaces (precheck script, MCP client, state files) stay byAir-only
+- Maps/traffic access is separate and is not configured by installing Flighty.
+- Use Viktor's intended Google Calendar connection. Account ambiguity is a
+  configuration error, never an empty calendar or permission to remove accounts.

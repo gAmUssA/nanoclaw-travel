@@ -43,7 +43,7 @@ FILTER = REPO_ROOT / "skills" / "nightly-travel-sync" / "scripts" / "filter-trip
 # The prefix `filter-tripit-bookings.py` matches on, and `check-travel-freshness.py`
 # emits as `subject_prefix`. Duplicated here as a fixture value, not imported —
 # a test that reads the constant it is checking proves nothing.
-TRIPIT_PREFIX = "Baruch, check out your TripIt itinerary for Fwd:"
+TRIPIT_PREFIX = "Viktor, check out your TripIt itinerary for Fwd:"
 
 SYNTH_QUERY = "from:tripit.com after:2026/07/01"
 

@@ -16,6 +16,15 @@ A step that hits a technical failure surfaces a one-line note and finishes the r
 
 ## Step 1 — TripIt → Reclaim sync
 
+**Viktor's deployment:** skip this step and continue to Step 2. The host
+LaunchAgent `com.nanoclaw.reclaim-timezones` owns hourly timezone-only sync;
+`tessl__reclaim-travel` describes its status and preview commands. Do not run a
+second writer. Calendar flight/OOO blocks remain disabled. The remaining steps
+refresh NanoClaw's local itinerary data.
+
+The upstream procedure below is reference for deployments without that host
+job; it must not be executed in Viktor's installation:
+
 Run the sync in-container; credentials are swapped at the OneCLI gateway (#748):
 
 ```bash

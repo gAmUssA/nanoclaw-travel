@@ -1,51 +1,18 @@
-"""Rank open seats by the operator's stated preferences.
+"""Viktor's solo-seat preference: aisle before other positions in a cabin.
 
-Ranking is preference, not fact, so it lives here rather than in the
-`expertflyer-api` service: the service reports what a seat *is*, this decides
-what a seat is *worth*.
-
-The operator's rules, verbatim in effect:
-
-  1. Window best, aisle works, middle never. A Main Cabin non-middle beats a
-     Comfort+ middle — and since middles are never taken, a middle is not
-     ranked low, it is excluded outright.
-  2. Closer to the front is better. Bulkhead carries no penalty. An
-     emergency exit row beats being further forward.
-  3. Exit row WITH recline (the second one) beats exit row without recline,
-     which beats any other seat in the cabin.
-  4. A Comfort+ middle never beats a Main Cabin aisle.
-  5. The exit-row preference applies in every cabin. Exit rows are
-     overwhelmingly a Main Cabin feature, but the preference is harmless
-     where there are none and correct where there are.
-
-Cabin outranks the exit row, per the operator: a better cabin buys
-front-of-the-bus AND leg room, whereas an exit row buys leg room alone. Cabins
-rank on the full ladder (`CABIN_SCORE`), not Comfort+-versus-everything: a
-two-value split puts First and Delta One BELOW Comfort+, so a Comfort+ window
-in row 30 reads as an upgrade from seat 1A.
-
-Window-versus-row is graded rather than absolute: an aisle up front beats a
-window far back, but a window a few rows further back still wins. WINDOW_WORTH_ROWS
-is that exchange rate.
+Window and middle are alternatives, not absolute exclusions. No front-row,
+exit-row or recline preference was stated. Cabin categories stay separate;
+family seating is evaluated as a 3+1 group by family_seating.py.
 """
 
 from __future__ import annotations
 
 import re
 
-# Comfort+ beats an exit row: it buys forward position AND leg room, where an
-# exit row buys only leg room.
 CABIN_OUTRANKS_EXIT = True
-
-# How many rows further back a window may sit and still beat an aisle. At
-# exactly this many rows the window wins; beyond it, the aisle does.
-WINDOW_WORTH_ROWS = 3
-
-# Never offered. Rule 1 is absolute: "middle - never".
-EXCLUDED_POSITIONS = frozenset({"middle"})
-
-# Higher is better.
-POSITION_SCORE = {"window": 2, "aisle": 1}
+WINDOW_WORTH_ROWS = 0
+EXCLUDED_POSITIONS = frozenset()
+POSITION_SCORE = {"aisle": 1, "window": 0, "middle": 0}
 
 FIRST = "F"
 BUSINESS = "C"
@@ -303,25 +270,17 @@ def seat_cabin(seat: dict, fallback: str | None = None) -> str:
 def seat_sort_key(
     seat: dict, cabin: str | None = None, tiers: dict[int, int] | None = None
 ) -> tuple:
-    """Sort key for one seat; higher tuples are better seats.
+    """Cabin category and confirmed solo-position preference, higher is better.
 
-    Position and row trade off rather than one dominating: a window counts as
-    WINDOW_WORTH_ROWS rows further forward than it is. Row is negated so a
-    lower row number sorts higher. The raw position breaks exact ties, which
-    is what makes a window exactly WINDOW_WORTH_ROWS back beat the aisle.
+    Same-position seats tie: row number and exit status are descriptive facts,
+    not unstated preferences. A different cabin is only an inventory alternative.
     """
     resolved = seat_cabin(seat, cabin)
-    position = POSITION_SCORE[_position(seat)]
-    exit_tier = _exit_tier(seat, resolved, tiers)
-    row = int(seat["row"])
-
-    effective_row = row - WINDOW_WORTH_ROWS if _position(seat) == "window" else row
-    cabin_key = _cabin_rank(resolved) if CABIN_OUTRANKS_EXIT else 0
-    return (cabin_key, exit_tier, -effective_row, position)
+    return (_cabin_rank(resolved), POSITION_SCORE[_position(seat)])
 
 
 def rank_seats(seats, cabin: str | None = None, cabin_exit_rows=None) -> list[dict]:
-    """Acceptable seats, best first. Middles are dropped, never ranked last.
+    """Available alternatives, aisles first within each cabin.
 
     `cabin_exit_rows` is the cabin's full exit-row set; see `exit_tiers`.
     """

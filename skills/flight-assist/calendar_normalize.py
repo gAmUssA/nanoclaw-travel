@@ -21,7 +21,7 @@ A real Reclaim travel block looks like:
 
     summary:     "🚌 Travel"
     description: "...created by <a href='https://app.reclaim.ai/...'>Reclaim</a>...
-                  Baruch is traveling to/from the airport for a flight..."
+                  Viktor is traveling to/from the airport for a flight..."
 
 A real Flighty flight event looks like:
 

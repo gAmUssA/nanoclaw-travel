@@ -28,6 +28,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import seat_quality  # noqa: E402
+from family_seating import family_options
 
 URL_ENV = "EXPERTFLYER_API_URL"
 TOKEN_ENV = "EXPERTFLYER_API_TOKEN"
@@ -141,6 +142,8 @@ def _rank(result: dict) -> dict:
         # Every open seat may still be unacceptable — a cabin of middles ranks
         # to nothing even though `available_total` is non-zero.
         result["acceptable_total"] = len(ranked)
+        result["preference"] = "solo: aisle"
+        result["preferred_total"] = sum(s.get("position") == "aisle" for s in ranked)
     except seat_quality.SeatQualityError as exc:
         # A seat the ranker refuses to order is a reportable answer, not a
         # traceback: the service replied, and the operator needs to read WHICH
@@ -221,7 +224,7 @@ def parse_args(argv=None):
     seats.add_argument("--flight", required=True)
     seats.add_argument("--date", required=True, help="YYYY-MM-DD")
     seats.add_argument("--cabin", required=True, help="e.g. 'premium economy', 'comfort+', W")
-    seats.add_argument("--want", default="non-middle")
+    seats.add_argument("--want", default="aisle")
     seats.add_argument("--origin")
     seats.add_argument("--destination")
     seats.add_argument(
@@ -279,6 +282,15 @@ def parse_args(argv=None):
     assess.add_argument("--destination")
     assess.add_argument("--date-fallback", action="store_true")
 
+    family = sub.add_parser("family-seats", help="Find four seats in a verified 3+1 arrangement across an aisle")
+    for flag in ("airline", "flight", "date", "cabin"):
+        family.add_argument("--" + flag, required=True)
+    family.add_argument("--origin")
+    family.add_argument("--destination")
+    family.add_argument("--held", default="", help="Comma-separated seats already held by this family")
+    family.add_argument("--allow-exit", action="store_true", help="Only when all four travellers are confirmed exit-row eligible")
+    family.set_defaults(date_fallback=False)
+
     fare = sub.add_parser("fare-class", help="Fare-class inventory for a flight")
     fare.add_argument("--origin", required=True)
     fare.add_argument("--destination", required=True)
@@ -298,7 +310,7 @@ def parse_args(argv=None):
     create.add_argument("--origin", required=True)
     create.add_argument("--destination", required=True)
     create.add_argument("--cabin")
-    create.add_argument("--want", default="non-middle")
+    create.add_argument("--want", default="aisle")
     create.add_argument("--class", dest="fare_class")
     create.add_argument("--force", action="store_true")
 
@@ -704,6 +716,19 @@ def _assess(args) -> dict:
 
 
 def run(args) -> dict:
+    if args.action == "family-seats":
+        result = _seats_in_cabin(args, args.cabin, "any")
+        if "error" in result:
+            return result
+        if "seat_layout" not in result:
+            return {"error": "layout_unavailable", "detail": "The service did not return explicit aisle geometry; seat letters alone cannot prove a 3+1 group."}
+        held = [x.strip().upper() for x in args.held.split(",") if x.strip()]
+        if len(set(held)) > 4:
+            return {"error": "bad_request", "detail": "Pass at most four seats held by this family."}
+        options = family_options(result["seat_layout"], held, args.allow_exit)
+        return {"flight": result.get("flight"), "date": result.get("date"), "cabin": result.get("cabin"),
+                "arrangement": "3+1", "options": options, "count": len(options),
+                "exit_rows_excluded": not args.allow_exit, "layout_verified": True}
     if args.action == "seats":
         return _rank(_seats_in_cabin(args, args.cabin, args.want))
     if args.action == "assess":

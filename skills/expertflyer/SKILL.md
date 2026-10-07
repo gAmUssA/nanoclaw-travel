@@ -5,6 +5,35 @@ description: Check seat availability or fare-class (upgrade) inventory on a flig
 
 # ExpertFlyer
 
+## Viktor's preferences and party context
+
+Solo: prefer an **aisle** within the ticketed cabin. Window/middle remain
+alternatives, not absolute exclusions. No exit-row, forward-row or recline
+preference was stated. The client ranks aisles first and does not call a row
+change an upgrade by itself. `preferred_total` counts available aisles.
+
+Family: prefer **3+1**, with three adjacent seats in one block and the fourth
+seat directly across the aisle in the same row. Use the family command below,
+not the solo `assess` verdict. It includes middle seats and validates explicit
+seat-map aisle geometry; it never guesses adjacency from letters. Preserve the
+family group before any individual seat preference. Check party context in
+`/workspace/group/travel-preferences.json` and trusted memory; if unknown,
+ask once when a recommendation depends on it. Never infer family/solo from a
+destination or assume one ticket proves solo travel.
+
+```bash
+python3 /home/node/.claude/skills/tessl__expertflyer/scripts/expertflyer.py family-seats \
+    --airline UA --flight 486 --date 2026-10-08 --cabin economy \
+    --origin EWR --destination MCO
+```
+
+Optionally pass `--held 12A,12B,12C,12D` only for seats confirmed held by the
+family. Occupied seats not explicitly held by them stay unavailable. Exit
+rows are excluded unless all four passengers are known eligible; only then
+may `--allow-exit` be used. `count: 0` means no verified 3+1 group is currently
+available in that map, not that the cabin is full. Single-seat alerts do not
+watch this four-seat arrangement. Do not create one as a substitute.
+
 This skill is an action router — pick the step that matches the operator's intent and execute only that step. Do not run other steps; do not parallelize.
 
 Every alert request is **check first, alert only if absent**. An alert for something already bookable is worse than useless: it delays the booking while the operator waits for an email describing space they could have taken on the spot. Report the check result either way, so it is visible why no alert was set. Only skip the check when the operator explicitly says to set the alert regardless.
@@ -36,7 +65,7 @@ For "is there a non-middle seat in Comfort+ on DL2957", "any window left in prem
 ```bash
 python3 /home/node/.claude/skills/tessl__expertflyer/scripts/expertflyer.py seats \
     --airline DL --flight 2957 --date 2026-08-11 \
-    --cabin "comfort+" --want non-middle
+    --cabin "comfort+" --want aisle
 ```
 
 `--cabin` takes the cabin the operator named — `premium economy`, `comfort+`, `business`, `first`, `economy` — or a bare code. Premium economy is Delta's **Premium Select** (`A`) and is a different cabin from Comfort+ (`W`); the service rejects an unrecognised cabin rather than falling back to economy. `--want` accepts `non-middle` (aisle and window), `aisle,window`, `middle`, or `any`. `--origin`/`--destination` are optional — omit them and the route is resolved from the flight number.
@@ -47,15 +76,15 @@ Outputs `cabin_present`, `seats_in_cabin`, `available_total`, `recommend_alert`,
 - `best` — the top seat's description, or `null` when nothing is worth taking
 - `acceptable_total` — how many seats are worth taking
 
-Decide on `best` and `acceptable_total`, never on `matching`. Ranking drops seats the operator will not take, so `matching` can list a seat that `ranked` excludes — a middle is reported by the service and refused by the ranking. Treat `matching` as informational only.
+Use `preferred_total` to distinguish preferred aisles from alternatives, never `matching` alone. Ranking reflects the confirmed solo aisle preference. `matching` is the service filter; `preferred_total` counts aisles, while `ranked` also retains non-aisle alternatives. If no aisle exists, label alternatives clearly instead of calling them preferred.
 
 A response carrying `error` has no `best`, `ranked` or `acceptable_total`. Absent is not `null`. Go to Step 6.
 
 On every other response:
 
 1. `cabin_present` is false — the aircraft has no such cabin. Say so. Offer no alert.
-2. `best` is set — name it and say it is open. Offer no alert.
-3. `best` is `null` — nothing in the cabin is worth taking, whatever `available_total` says. Offer the alert (Step 5).
+2. `preferred_total` is positive — name the best aisle and say it is open. Offer no alert.
+3. `preferred_total` is zero — no aisle is currently available. Report other positions as alternatives and offer an aisle alert only for a solo traveller. Create an alert only if Viktor requests it.
 
 Ranking rules live in `skills/expertflyer/scripts/seat_quality.py`.
 
@@ -75,9 +104,14 @@ python3 /home/node/.claude/skills/tessl__expertflyer/scripts/expertflyer.py asse
 
 `--held` is the seat currently assigned. `--held-cabin` is optional; omit it and the cabin is resolved from the aircraft's row extents. `--held-position` is `window`, `aisle` or `middle`; omit it and the column is read off the open seats in the same cabin. `--scan-up` sets how many cabins above the held one to include — the default and its cost are in `skills/expertflyer/scripts/expertflyer.py`.
 
-Get the held seat from byAir before calling this. `byair_get_flight` returns it as `seatNumber` and `seatType` — camelCase on read, where `byair_update_booking_info` takes `seat_number` and `seat_type` on write. When byAir has no seat for the flight, ask the operator for it, write it back to byAir, then call this. Never infer the seat from a previous conversation.
+Get the held seat from the matching Flighty record via `tessl__flighty` before
+calling this. The CLI returns `seatNumber`; it may be absent or cached. If the
+seat is missing or Viktor says it changed, ask him for the current seat. Do not
+write it back to the read-only Flighty mount or call byAir. Never infer the seat
+from a previous conversation. Pass `--held-position` only when known; otherwise
+let the seat map resolve it.
 
-Do not ask for the cabin. Never read one out of byAir. Omit `--held-cabin` and the cabin is resolved from the aircraft. `held_cabin_from` reports `stated` or `resolved`.
+Do not ask for the cabin initially. Omit `--held-cabin` and the cabin is resolved from the aircraft. `held_cabin_from` reports `stated` or `resolved`.
 
 Pass `--held-cabin` only when the operator names a cabin themselves, or when a response asks for it.
 
@@ -127,7 +161,7 @@ Never say the held seat beat a cabin. `optimal` compares it against the seats th
 
 **`no_held_seat`** — no seat was passed.
 
-- Get the seat from byAir, or from the operator.
+- Get the seat from the matching Flighty record, or from the operator.
 - Report nothing about seat quality.
 
 **`held_cabin_unresolved`** — the layout does not say which cabin holds that row. `reason` says why.
@@ -184,7 +218,10 @@ The pass covers the next trip. `--trips N` widens it to the next N; `--trips 0` 
 
 `count: 0` with a non-empty `excluded` means no upcoming trip covers those flights. Report that rather than reporting nothing.
 
-Collect the held seat for every flight in one exchange before assessing any of them. Read each from byAir. Ask the operator once, in a single message, for every flight byAir has no seat for. Write each answer back to byAir. Ask for no cabins — Step 3 resolves them.
+Collect the held seat for every flight before assessing any of them. Read each
+from the matching Flighty record. Ask the operator once, in a single message,
+for every flight with a missing or outdated seat. Do not write to Flighty.
+Ask for no cabins initially — Step 3 resolves them.
 
 Then run Step 3 once per flight, adding `--date-fallback`. Read `date_fallback_applied` to see which date answered. Do not pass it in Step 3 for a date the operator named.
 
@@ -212,7 +249,7 @@ Only after Step 1, 2, 3 or 4 reported the wanted thing absent, or the operator e
 # Seat alert — needs --cabin and --want
 python3 /home/node/.claude/skills/tessl__expertflyer/scripts/expertflyer.py create-alert \
     --kind seat --airline DL --flight 2957 --date 2026-08-11 \
-    --origin ATL --destination YYZ --cabin "comfort+" --want non-middle
+    --origin ATL --destination YYZ --cabin "comfort+" --want aisle
 
 # Fare-class alert — needs --class
 python3 /home/node/.claude/skills/tessl__expertflyer/scripts/expertflyer.py create-alert \
