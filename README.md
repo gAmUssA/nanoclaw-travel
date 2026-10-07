@@ -90,7 +90,7 @@ Travel history is the same story. **`jbaruch/tripit-api`** ships the `using-trip
 | Rule | Summary |
 |------|---------|
 | [flight-data-locality](rules/flight-data-locality.md) | Viktor uses Flighty for cached flight data, TripIt for booked itineraries, and ExpertFlyer for availability; Reclaim changes require his chosen automation scope. byAir polling is disabled |
-| [operator-local-tz-phrasing](rules/operator-local-tz-phrasing.md) | Relative-date words ("today"/"tomorrow") in a surface are phrased against the operator's local date (via `read-current-tz.py`), not the container UTC clock; displayed airport clock times stay as-is |
+| [operator-local-tz-phrasing](rules/operator-local-tz-phrasing.md) | Relative-date words ("today"/"tomorrow") in a surface are phrased against the operator's local date (via the core `current-tz` skill's `read-current-tz.py`), not the container UTC clock; displayed airport clock times stay as-is |
 
 ## Skills
 
@@ -115,7 +115,6 @@ The skill bundle includes executable scripts the agent invokes via the SKILL.md 
 - `scripts/get-flight-state.py` — fetches a flight's last-known snapshot to enrich notifications
 - `expertflyer/scripts/expertflyer.py` — thin HTTP client for the ExpertFlyer API service, plus the `assess` sweep that ranks open seats against the one held (stdlib only)
 - `expertflyer/scripts/seat_quality.py` — the operator's seat preferences: the cabin ladder, the exit-row tiers, and whether an open seat beats the held one
-- `scripts/read-current-tz.py` — resolves the operator's `current_tz` from `tz_state` so surfaces phrase relative dates in the operator's local zone (see `operator-local-tz-phrasing` rule)
 
 Plus scheduler-invoked scripts (not user-facing):
 
