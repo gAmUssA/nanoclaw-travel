@@ -5,5 +5,6 @@
 - Version: `0.1.1`
 - License: MIT (see LICENSE)
 
-The Python CLI and command reference are unchanged from this revision.
+The command reference is unchanged from this revision. The vendored Python CLI has
+local formatting and type annotations to pass NanoClaw’s lint/type checks; behavior is unchanged.
 SKILL.md is adapted for NanoClaw's skill path and read-only database mount.

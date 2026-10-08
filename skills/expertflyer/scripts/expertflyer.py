@@ -282,13 +282,21 @@ def parse_args(argv=None):
     assess.add_argument("--destination")
     assess.add_argument("--date-fallback", action="store_true")
 
-    family = sub.add_parser("family-seats", help="Find four seats in a verified 3+1 arrangement across an aisle")
+    family = sub.add_parser(
+        "family-seats", help="Find four seats in a verified 3+1 arrangement across an aisle"
+    )
     for flag in ("airline", "flight", "date", "cabin"):
         family.add_argument("--" + flag, required=True)
     family.add_argument("--origin")
     family.add_argument("--destination")
-    family.add_argument("--held", default="", help="Comma-separated seats already held by this family")
-    family.add_argument("--allow-exit", action="store_true", help="Only when all four travellers are confirmed exit-row eligible")
+    family.add_argument(
+        "--held", default="", help="Comma-separated seats already held by this family"
+    )
+    family.add_argument(
+        "--allow-exit",
+        action="store_true",
+        help="Only when all four travellers are confirmed exit-row eligible",
+    )
     family.set_defaults(date_fallback=False)
 
     fare = sub.add_parser("fare-class", help="Fare-class inventory for a flight")
@@ -721,14 +729,30 @@ def run(args) -> dict:
         if "error" in result:
             return result
         if "seat_layout" not in result:
-            return {"error": "layout_unavailable", "detail": "The service did not return explicit aisle geometry; seat letters alone cannot prove a 3+1 group."}
+            return {
+                "error": "layout_unavailable",
+                "detail": (
+                    "The service did not return explicit aisle geometry; "
+                    "seat letters alone cannot prove a 3+1 group."
+                ),
+            }
         held = [x.strip().upper() for x in args.held.split(",") if x.strip()]
         if len(set(held)) > 4:
-            return {"error": "bad_request", "detail": "Pass at most four seats held by this family."}
+            return {
+                "error": "bad_request",
+                "detail": "Pass at most four seats held by this family.",
+            }
         options = family_options(result["seat_layout"], held, args.allow_exit)
-        return {"flight": result.get("flight"), "date": result.get("date"), "cabin": result.get("cabin"),
-                "arrangement": "3+1", "options": options, "count": len(options),
-                "exit_rows_excluded": not args.allow_exit, "layout_verified": True}
+        return {
+            "flight": result.get("flight"),
+            "date": result.get("date"),
+            "cabin": result.get("cabin"),
+            "arrangement": "3+1",
+            "options": options,
+            "count": len(options),
+            "exit_rows_excluded": not args.allow_exit,
+            "layout_verified": True,
+        }
     if args.action == "seats":
         return _rank(_seats_in_cabin(args, args.cabin, args.want))
     if args.action == "assess":

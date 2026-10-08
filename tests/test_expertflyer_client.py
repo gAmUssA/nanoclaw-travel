@@ -274,11 +274,11 @@ LIVE_SEATS = {
 
 
 def test_seats_response_is_ranked_before_it_reaches_the_agent():
-    """A cabin whose only free seat is a middle offers nothing."""
+    """A middle remains a clearly labeled alternative when it is the only opening."""
     out = client._rank(dict(LIVE_SEATS))
-    assert out["ranked"] == []
-    assert out["best"] is None
-    assert out["acceptable_total"] == 0
+    assert [s["label"] for s in out["ranked"]] == ["14B"]
+    assert out["best"] == "14B (middle)"
+    assert out["acceptable_total"] == 1
     assert out["available_total"] == 1
 
 
@@ -292,8 +292,8 @@ def test_ranking_orders_bookable_seats_and_says_why():
         "available_total": 2,
     }
     out = client._rank(payload)
-    assert [s["label"] for s in out["ranked"]] == ["12A", "20C"]
-    assert out["best"] == "12A (window)"
+    assert [s["label"] for s in out["ranked"]] == ["20C", "12A"]
+    assert out["best"] == "20C (aisle)"
     assert out["acceptable_total"] == 2
 
 
@@ -343,10 +343,10 @@ def test_rank_labels_the_reclining_exit_row_on_the_production_path():
         "available_total": 2,
     }
     out = client._rank(payload)
-    assert out["best"] == "21A (window, exit row, reclines)"
-    assert out["ranked"][0]["why"] == "21A (window, exit row, reclines)"
+    assert out["best"] == "20A (window, exit row)"
+    assert out["ranked"][1]["why"] == "21A (window, exit row, reclines)"
     # The row in front is fixed-back precisely because 21 sits behind it.
-    assert out["ranked"][1]["why"] == "20A (window, exit row)"
+    assert out["ranked"][0]["why"] == "20A (window, exit row)"
 
 
 def test_rank_does_not_promote_an_exit_row_when_the_layout_is_absent():
@@ -675,7 +675,7 @@ def test_a_window_stays_optimal_when_only_middles_are_open(cabins):
     assert out["verdict"] == client.VERDICT_OPTIMAL
     assert out["upgrades"] == []
     assert out["best_upgrade"] is None
-    assert out["alert_recommended"] is True
+    assert out["alert_recommended"] is False
     assert out["cabins_absent"] == ["A"]
 
 
@@ -684,9 +684,9 @@ def test_a_comfort_plus_window_never_upgrades_the_first_seat_held(cabins):
     cabins["F"] = _cabin(
         "F",
         [
-            {"label": "3C", "row": 3, "column": "C", "position": "aisle"},
+            {"label": "3A", "row": 3, "column": "A", "position": "window"},
             # Row 1 seen in F corroborates the held cabin, so no downward probe.
-            {"label": "1C", "row": 1, "column": "C", "position": "aisle"},
+            {"label": "1F", "row": 1, "column": "F", "position": "window"},
         ],
     )
     out = client.run(
@@ -855,7 +855,7 @@ def test_a_held_middle_with_only_middles_open_stays_optimal(cabins):
     cabins["W"] = _cabin("W", [{"label": "14B", "row": 14, "column": "B", "position": "middle"}])
     out = _assess(held="13B", held_position="middle")
     assert out["verdict"] == client.VERDICT_OPTIMAL
-    assert out["alert_recommended"] is True
+    assert out["alert_recommended"] is False
 
 
 def test_optimal_names_the_cabins_it_never_looked_at(cabins):
@@ -1025,7 +1025,7 @@ def test_a_row_absent_from_the_held_cabin_is_never_disproof(cabins):
     """`/seats` reports bookable seats, so a row whose every seat is taken is
     missing from the response while still being in the cabin. Refusing on that
     would reject a correct assessment."""
-    cabins["W"] = _cabin("W", [{"label": "12A", "row": 12, "column": "A", "position": "window"}])
+    cabins["W"] = _cabin("W", [{"label": "12C", "row": 12, "column": "C", "position": "aisle"}])
     out = _assess(held="21F", held_position="window")
     assert out["held_cabin_corroborated"] is None
     assert out["row_seen_in"] == []
@@ -1109,7 +1109,7 @@ def test_an_occupied_row_is_not_mistaken_for_an_absent_one(cabins):
     seat-derived check called this unknown; `rows` calls it what it is."""
     cabins["W"] = _cabin_with_rows(
         "W",
-        [{"label": "12A", "row": 12, "column": "A", "position": "window"}],
+        [{"label": "12C", "row": 12, "column": "C", "position": "aisle"}],
         list(range(10, 22)),
     )
     out = _assess(held="21F", held_position="window")
@@ -1119,7 +1119,7 @@ def test_an_occupied_row_is_not_mistaken_for_an_absent_one(cabins):
 
 def test_a_service_without_rows_still_corroborates_and_never_disproves(cabins):
     """Older expertflyer-api: no `rows`, so absence stays undecidable."""
-    cabins["W"] = _cabin("W", [{"label": "12A", "row": 12, "column": "A", "position": "window"}])
+    cabins["W"] = _cabin("W", [{"label": "12C", "row": 12, "column": "C", "position": "aisle"}])
     out = _assess(held="21F", held_position="window")
     assert out["held_cabin_corroborated"] is None
     assert out["held_cabin_source"] == "seats"
@@ -1131,7 +1131,7 @@ def test_a_service_without_rows_still_corroborates_and_never_disproves(cabins):
 
 def test_the_true_reason_per_cabin_is_reported(cabins):
     """The live DL2957 report claimed 21F "beat even Comfort+". It did not:
-    Comfort+ outranks a Main exit row, and only had nothing acceptable open.
+    Comfort+ outranks a Main exit row, and the available middle is still a cabin opening.
     `acceptable_by_cabin` is that distinction as data."""
     cabins["Y"] = _cabin_with_rows(
         "Y",
@@ -1142,7 +1142,7 @@ def test_the_true_reason_per_cabin_is_reported(cabins):
         list(range(16, 33)),
         exit_rows=[19, 20, 21],
     )
-    # Comfort+ open but every seat a middle: nothing worth taking.
+    # Comfort+ middle seats are alternatives, not automatically excluded.
     cabins["W"] = _cabin_with_rows(
         "W", [{"label": "14B", "row": 14, "column": "B", "position": "middle"}], list(range(10, 21))
     )
@@ -1166,17 +1166,17 @@ def test_the_true_reason_per_cabin_is_reported(cabins):
         )
     )
     assert out["verdict"] == client.VERDICT_OPTIMAL
-    # W had nothing worth taking — not "W lost to 21F".
-    assert out["acceptable_by_cabin"]["W"] == 0
-    assert out["acceptable_by_cabin"]["Y"] == 1
-    assert out["alert_recommended"] is True
+    # All available positions remain visible; aisle is the within-cabin preference.
+    assert out["acceptable_by_cabin"]["W"] == 1
+    assert out["acceptable_by_cabin"]["Y"] == 2
+    assert out["alert_recommended"] is False
 
 
 def test_a_better_cabin_is_an_opening_not_a_seat_change(cabins):
     """A seat in a cabin the operator is not ticketed into cannot be selected
     in the app — it is a fare change or an upgrade clearance. Reporting it as
     an upgrade tells them to go take a seat that is not theirs to take."""
-    cabins["Y"] = _cabin("Y", [{"label": "30C", "row": 30, "column": "C", "position": "aisle"}])
+    cabins["Y"] = _cabin("Y", [{"label": "30F", "row": 30, "column": "F", "position": "window"}])
     cabins["W"] = _cabin("W", [{"label": "12A", "row": 12, "column": "A", "position": "window"}])
     out = client.run(
         client.parse_args(
@@ -1233,7 +1233,7 @@ def test_a_same_cabin_seat_is_still_a_real_upgrade(cabins):
         )
     )
     assert out["verdict"] == client.VERDICT_UPGRADE
-    assert out["best_upgrade"] == "12A (window)"
+    assert out["best_upgrade"] == "30C (aisle)"
     assert out["cabin_openings"] == []
 
 
@@ -1242,9 +1242,10 @@ def test_the_alert_covers_one_rung_up_however_wide_the_sweep(cabins):
     A wide sweep sees what exists; it does not widen what is worth watching."""
     for code in ("Y", "W", "A", "C", "F"):
         cabins[code] = _cabin(code, [])
-    # A middle only: nothing worth taking anywhere, so every watchable cabin
-    # stays watchable and the rung bound is the only thing narrowing the list.
-    cabins["Y"] = _cabin("Y", [{"label": "30B", "row": 30, "column": "B", "position": "middle"}])
+    # A First opening keeps this a real comparison, but must not widen
+    # the watch list beyond the held cabin and its immediate upgrade.
+    cabins["F"] = _cabin("F", [{"label": "1C", "row": 1, "column": "C", "position": "aisle"}])
+    cabins["Y"] = _cabin_with_rows("Y", [], list(range(16, 33)))
     out = client.run(
         client.parse_args(
             [
@@ -1271,17 +1272,18 @@ def test_the_alert_covers_one_rung_up_however_wide_the_sweep(cabins):
 
 
 def test_the_alert_never_names_a_cabin_the_aircraft_lacks(cabins):
-    cabins["W"] = _cabin("W", [{"label": "12B", "row": 12, "column": "B", "position": "middle"}])
+    cabins["W"] = _cabin("W", [{"label": "21A", "row": 21, "column": "A", "position": "window"}])
     cabins["A"] = _cabin("A", [], present=False)
     out = _assess(held="21F", held_position="window")
     assert out["cabins_absent"] == ["A"]
-    assert out["alert_cabins"] == ["W"]
+    # W already has an acceptable alternative; absent A cannot be watched.
+    assert out["alert_cabins"] == []
 
 
 def test_a_cabin_already_holding_a_seat_is_not_worth_watching(cabins):
     """Check first, alert only if absent. A watch on a cabin with a seat
     already open fires the moment it is created."""
-    # Main has open seats, none better than the held exit row. Comfort+ empty.
+    # Main has open seats, none better than the held aisle. Comfort+ empty.
     cabins["Y"] = _cabin(
         "Y",
         [{"label": "30C", "row": 30, "column": "C", "position": "aisle"}],
@@ -1301,9 +1303,9 @@ def test_a_cabin_already_holding_a_seat_is_not_worth_watching(cabins):
                 "--held-cabin",
                 "Y",
                 "--held",
-                "21F",
+                "21D",
                 "--held-position",
-                "window",
+                "aisle",
             ]
         )
     )
@@ -1528,7 +1530,7 @@ def test_a_split_row_resolves_once_the_operator_names_the_cabin(cabins):
     )
     assert out["held"]["cabin"] == "W"
     assert out["held_cabin_from"] == "stated"
-    assert out["verdict"] == client.VERDICT_OPTIMAL
+    assert out["verdict"] == client.VERDICT_UPGRADE
 
 
 def test_a_row_in_one_cabin_only_still_resolves_without_asking(cabins):

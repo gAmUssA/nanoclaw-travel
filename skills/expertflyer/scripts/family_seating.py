@@ -17,14 +17,9 @@ def family_options(layout, held=(), allow_exit=False):
                 seats = left + right
                 if any(s.get("type") != "seat" for s in seats):
                     continue
-                if (
-                    left[-1].get("position") != "aisle"
-                    or right[0].get("position") != "aisle"
-                ):
+                if left[-1].get("position") != "aisle" or right[0].get("position") != "aisle":
                     continue
-                if any(
-                    not (s.get("available") or s.get("label") in owned) for s in seats
-                ):
+                if any(not (s.get("available") or s.get("label") in owned) for s in seats):
                     continue
                 if not allow_exit and any(s.get("isExitRow") for s in seats):
                     continue

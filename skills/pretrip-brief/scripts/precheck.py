@@ -2,14 +2,14 @@
 """Wake for unsent pre-departure briefings; never send or mutate providers."""
 
 import argparse
-from datetime import datetime, time, timedelta, timezone
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import subprocess
 import tempfile
+from datetime import datetime, time, timedelta, timezone
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 GROUP = Path(os.environ.get("NANOCLAW_GROUP_DIR", "/workspace/group"))
@@ -27,6 +27,13 @@ def instant(value):
         return None
 
 
+def departure_at(flight) -> datetime:
+    parsed = instant(flight.get("departure"))
+    if parsed is None:
+        raise ValueError("Flight departure must include a valid timezone-aware timestamp")
+    return parsed
+
+
 def atomic_json(path, value):
     fd, tmp = tempfile.mkstemp(prefix=".pretrip-", dir=path.parent)
     try:
@@ -39,16 +46,12 @@ def atomic_json(path, value):
 
 
 def flight_zone(flight):
-    return (
-        ZoneInfo(flight["timezone"])
-        if flight.get("timezone")
-        else instant(flight["departure"]).tzinfo
-    )
+    return ZoneInfo(flight["timezone"]) if flight.get("timezone") else departure_at(flight).tzinfo
 
 
 def flight_identity(flight):
     # Stable across a delay/re-time on the same departure-local date.
-    start = instant(flight["departure"])
+    start = departure_at(flight)
     tz = flight_zone(flight)
     return "|".join(
         [
@@ -61,7 +64,7 @@ def flight_identity(flight):
 
 
 def due_at(flight, mode):
-    departure = instant(flight["departure"])
+    departure = departure_at(flight)
     zone = flight_zone(flight)
     local = departure.astimezone(zone)
     if mode == "24-hours":
@@ -75,7 +78,7 @@ def due_at(flight, mode):
 
 
 def due_journeys(flights, sent, now, mode):
-    ordered = sorted(flights, key=lambda f: instant(f["departure"]))
+    ordered = sorted(flights, key=lambda f: departure_at(f))
     journeys = []
     for flight in ordered:
         if not journeys:
@@ -83,7 +86,7 @@ def due_journeys(flights, sent, now, mode):
             continue
         previous = journeys[-1][-1]
         arrival = instant(previous.get("arrival"))
-        gap = instant(flight["departure"]) - arrival if arrival else None
+        gap = departure_at(flight) - arrival if arrival else None
         # Only join a known route continuity with a plausible connection.
         if (
             gap is not None
@@ -97,13 +100,8 @@ def due_journeys(flights, sent, now, mode):
     for journey in journeys:
         first = journey[0]
         departure = instant(first["departure"])
-        keys = [
-            hashlib.sha256(flight_identity(f).encode()).hexdigest()[:24]
-            for f in journey
-        ]
-        if any(key in sent for key in keys) or not (
-            due_at(first, mode) <= now < departure
-        ):
+        keys = [hashlib.sha256(flight_identity(f).encode()).hexdigest()[:24] for f in journey]
+        if any(key in sent for key in keys) or not (due_at(first, mode) <= now < departure):
             continue
         due.append(
             {
@@ -168,9 +166,7 @@ def collect_flights(now):
         if result.returncode or not result_json.get("ok"):
             raise ValueError("Flighty query failed")
         if len(result_json["data"]) == 500:
-            errors.append(
-                "Flighty list reached its limit; future flights may be truncated"
-            )
+            errors.append("Flighty list reached its limit; future flights may be truncated")
         for f in result_json["data"]:
             dep = f.get("departureScheduleGateOriginal")
             arr = f.get("arrivalScheduleGateOriginal")
@@ -190,9 +186,7 @@ def collect_flights(now):
                 "source": "Flighty cache",
                 "cached_at": f.get("lastUpdated"),
             }
-            if not all(
-                flight.get(k) for k in ("code", "origin", "destination", "timezone")
-            ):
+            if not all(flight.get(k) for k in ("code", "origin", "destination", "timezone")):
                 continue
             if f.get("isCancelled"):
                 cancelled.append(flight)
@@ -227,7 +221,7 @@ def collect_flights(now):
                 f["code"] == flight["code"]
                 and f["origin"] == flight["origin"]
                 and f["destination"] == flight["destination"]
-                and abs((instant(f["departure"]) - dep).total_seconds()) < 12 * 3600
+                and abs((departure_at(f) - dep).total_seconds()) < 12 * 3600
                 for f in cancelled
             ):
                 continue
@@ -239,7 +233,7 @@ def collect_flights(now):
                     if f["code"] == flight["code"]
                     and f["origin"] == flight["origin"]
                     and f["destination"] == flight["destination"]
-                    and abs((instant(f["departure"]) - dep).total_seconds()) < 12 * 3600
+                    and abs((departure_at(f) - dep).total_seconds()) < 12 * 3600
                 ),
                 None,
             )

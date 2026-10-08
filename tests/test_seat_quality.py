@@ -39,40 +39,40 @@ def seat(row, label, position, *, exit_row=False, reclines=False, bulkhead=False
     }
 
 
-# --- rule 1: window > aisle, middle never ------------------------------------
+# --- Viktor: aisle preference; other positions remain alternatives ---
 
 
-def test_window_beats_aisle():
+def test_aisle_beats_window():
     window, aisle = seat(20, "A", "window"), seat(20, "C", "aisle")
-    assert sq.rank_seats([aisle, window], W)[0] is window
+    assert sq.rank_seats([aisle, window], W)[0] is aisle
 
 
-def test_middle_is_excluded_not_merely_ranked_last():
+def test_middle_is_an_alternative_not_an_absolute_exclusion():
     middle = seat(10, "B", "middle")
-    assert sq.is_acceptable(middle) is False
-    assert sq.rank_seats([middle], W) == []
+    assert sq.is_acceptable(middle) is True
+    assert sq.rank_seats([middle], W) == [middle]
 
 
-def test_a_cabin_of_only_middles_yields_nothing():
-    """DL2957 Comfort+: 13B and 14B open, both middles — offer nothing."""
+def test_a_cabin_of_only_middles_remains_visible():
+    """DL2957 Comfort+: 13B and 14B open, both middles — show alternatives."""
     seats = [seat(13, "B", "middle"), seat(14, "B", "middle")]
-    assert sq.rank_seats(seats, W) == []
-    assert sq.best_seat(seats, W) is None
+    assert sq.rank_seats(seats, W) == seats
+    assert sq.best_seat(seats, W) is seats[0]
 
 
-def test_main_cabin_non_middle_beats_comfort_plus_middle():
-    """Rule 1, and rule 4 restated: the middle is not an option at all."""
+def test_positions_are_preferences_not_absolute_exclusions():
+    """Viktor specified an aisle preference, not a ban on alternatives."""
     main_aisle = seat(30, "C", "aisle")
     assert sq.is_acceptable(main_aisle) is True
-    assert sq.is_acceptable(seat(12, "B", "middle")) is False
+    assert sq.is_acceptable(seat(12, "B", "middle")) is True
 
 
-# --- rule 2: closer to the front ---------------------------------------------
+# --- No front-row preference was stated ---------------------------------------------
 
 
-def test_closer_to_the_front_wins_among_equals():
+def test_equal_positions_do_not_invent_a_front_row_preference():
     front, back = seat(10, "A", "window"), seat(30, "A", "window")
-    assert sq.rank_seats([back, front], W)[0] is front
+    assert sq.rank_seats([back, front], W)[0] is back
 
 
 def test_bulkhead_carries_no_penalty():
@@ -81,19 +81,19 @@ def test_bulkhead_carries_no_penalty():
     assert sq.seat_sort_key(bulk, W) == sq.seat_sort_key(plain, W)
 
 
-# --- rules 2 + 3: Main Cabin exit rows ---------------------------------------
+# --- Exit-row metadata is not a seat preference ---------------------------------------
 
 
-def test_the_exit_row_beats_being_further_forward():
+def test_exit_rows_have_no_automatic_preference():
     forward = seat(15, "A", "window")
     exit_back = seat(30, "A", "window", exit_row=True)
-    assert sq.rank_seats([forward, exit_back], Y)[0] is exit_back
+    assert sq.rank_seats([forward, exit_back], Y)[0] is forward
 
 
-def test_reclining_exit_row_beats_the_fixed_one():
+def test_recline_does_not_override_equal_position_scores():
     fixed = seat(30, "A", "window", exit_row=True, reclines=False)
     reclining = seat(31, "A", "window", exit_row=True, reclines=True)
-    assert sq.rank_seats([fixed, reclining], Y)[0] is reclining
+    assert sq.rank_seats([fixed, reclining], Y)[0] is fixed
 
 
 def test_exit_row_beats_any_other_main_seat_including_a_window():
@@ -102,28 +102,28 @@ def test_exit_row_beats_any_other_main_seat_including_a_window():
     assert sq.rank_seats([plain_window, exit_aisle], Y)[0] is exit_aisle
 
 
-def test_exit_row_counts_in_comfort_plus_too():
-    """Rule 5: harmless where W has no exit row, correct where it does."""
+def test_comfort_plus_does_not_inherit_exit_row_preference():
+    """Equal positions retain source order regardless of exit rows."""
     exit_back = seat(30, "A", "window", exit_row=True)
     forward = seat(15, "A", "window")
-    assert sq.rank_seats([forward, exit_back], W)[0] is exit_back
+    assert sq.rank_seats([forward, exit_back], W)[0] is forward
 
 
 def test_unknown_recline_does_not_promote_a_possibly_fixed_seat():
     unknown = {**seat(30, "A", "window", exit_row=True)}
     del unknown["reclines"]
     known_reclining = seat(31, "A", "window", exit_row=True, reclines=True)
-    assert sq.rank_seats([unknown, known_reclining], Y)[0] is known_reclining
+    assert sq.rank_seats([unknown, known_reclining], Y)[0] is unknown
 
 
 # --- documented tie-breaks ---------------------------------------------------
 
 
-def test_a_window_within_the_exchange_rate_beats_an_aisle_up_front():
-    """ "in a span of 3 rows I'd take window further back"."""
+def test_a_nearby_window_does_not_beat_an_aisle():
+    """Aisle preference has no inherited window/row exchange rate."""
     front_aisle = seat(10, "C", "aisle")
     window_3_back = seat(10 + sq.WINDOW_WORTH_ROWS, "A", "window")
-    assert sq.rank_seats([front_aisle, window_3_back], W)[0] is window_3_back
+    assert sq.rank_seats([front_aisle, window_3_back], W)[0] is front_aisle
 
 
 def test_a_window_beyond_the_exchange_rate_loses_to_the_aisle():
@@ -146,13 +146,13 @@ def test_comfort_plus_outranks_an_exit_row():
 
 def test_only_a_strictly_better_seat_is_worth_interrupting_for():
     current = seat(20, "C", "aisle")
-    assert sq.is_upgrade(seat(12, "A", "window"), current, W) is True
+    assert sq.is_upgrade(seat(12, "A", "window"), current, W) is False
     assert sq.is_upgrade(seat(28, "C", "aisle"), current, W) is False
     assert sq.is_upgrade(current, current, W) is False
 
 
-def test_a_middle_is_never_an_upgrade_even_from_nothing():
-    assert sq.is_upgrade(seat(10, "B", "middle"), None, W) is False
+def test_a_middle_is_an_option_when_no_seat_is_held():
+    assert sq.is_upgrade(seat(10, "B", "middle"), None, W) is True
 
 
 def test_anything_acceptable_beats_having_no_seat_yet():
@@ -198,9 +198,9 @@ def test_ranks_the_service_response_shape_directly():
             "cabin": "W",
         }
     ]
-    assert sq.rank_seats(live, W) == []
-    assert sq.best_seat(live, W) is None
-    assert sq.is_upgrade(live[0], None, W) is False
+    assert sq.rank_seats(live, W) == live
+    assert sq.best_seat(live, W) is live[0]
+    assert sq.is_upgrade(live[0], None, W) is True
 
 
 def test_service_shape_window_and_aisle_rank_normally():
@@ -208,7 +208,7 @@ def test_service_shape_window_and_aisle_rank_normally():
         {"label": "12C", "row": 12, "column": "C", "position": "aisle", "cabin": "W"},
         {"label": "14A", "row": 14, "column": "A", "position": "window", "cabin": "W"},
     ]
-    assert sq.rank_seats(seats, W)[0]["label"] == "14A"
+    assert sq.rank_seats(seats, W)[0]["label"] == "12C"
 
 
 def test_an_unrecognised_position_string_raises_rather_than_guessing():
@@ -278,10 +278,10 @@ def exit_seat(row, label="A", position="window", cabin=None):
     }
 
 
-def test_paired_exit_rows_put_the_second_ahead_of_the_first():
+def test_paired_exit_rows_retain_equal_preference():
     """ "we don't want first, and want second" — the first cannot recline."""
     first, second = exit_seat(20), exit_seat(21)
-    assert sq.rank_seats([first, second], W, [20, 21])[0] is second
+    assert sq.rank_seats([first, second], W, [20, 21])[0] is first
 
 
 def test_a_lone_exit_row_reclines():
@@ -313,7 +313,7 @@ def test_non_adjacent_exit_rows_both_recline():
     assert sq.rank_seats(seats, W, [12, 30])[0]["row"] == 12
 
 
-def test_adjacency_is_computed_over_the_whole_cabin_including_dropped_seats():
+def test_adjacency_is_computed_over_the_whole_cabin_including_middle_seats():
     """A middle in the row behind still fixes the row in front."""
     seats = [
         exit_seat(20),
@@ -327,7 +327,7 @@ def test_adjacency_is_computed_over_the_whole_cabin_including_dropped_seats():
         },
     ]
     assert sq.exit_tiers(seats, [20, 21])[20] == sq.EXIT_NO_RECLINE
-    assert [s["row"] for s in sq.rank_seats(seats, W, [20, 21])] == [20]
+    assert [s["row"] for s in sq.rank_seats(seats, W, [20, 21])] == [20, 21]
 
 
 def test_describe_names_the_reclining_exit_row_from_adjacency():
@@ -368,11 +368,11 @@ def test_without_a_layout_no_exit_row_is_claimed_to_recline():
     }
 
 
-def test_upgrade_sees_the_reclining_exit_row_when_given_the_layout():
+def test_exit_layout_alone_does_not_make_a_seat_an_upgrade():
     """The watch case: 21A opens and must beat the fixed-back 20A held today."""
     held = exit_seat(20, cabin=Y)
     opened = exit_seat(21, cabin=Y)
-    assert sq.is_upgrade(opened, held, Y, [20, 21]) is True
+    assert sq.is_upgrade(opened, held, Y, [20, 21]) is False
     assert sq.is_upgrade(held, opened, Y, [20, 21]) is False
 
 
@@ -527,13 +527,14 @@ def test_columns_ignore_seats_with_no_usable_position():
     assert sq.column_positions(unusable) == {"C": "aisle"}
 
 
-def test_anything_worth_taking_beats_a_middle_already_held():
-    """Rule 1 is absolute, so a held middle has no position score to sort by.
-    It needs none: every acceptable seat beats it, however far back."""
+def test_aisle_preference_does_not_downgrade_the_held_cabin():
+    """Prefer an aisle in the held cabin; a lower cabin is not an upgrade."""
     held_middle = {"label": "13B", "row": 13, "position": "middle", "cabin": W}
     assert sq.is_upgrade({"label": "20C", "row": 20, "position": "aisle", "cabin": W}, held_middle)
-    # Worse cabin, worse row, still an upgrade — a middle is never taken.
-    assert sq.is_upgrade({"label": "40C", "row": 40, "position": "aisle", "cabin": Y}, held_middle)
+    # A preferred position does not make a cabin downgrade an upgrade.
+    assert not sq.is_upgrade(
+        {"label": "40C", "row": 40, "position": "aisle", "cabin": Y}, held_middle
+    )
     # Another middle is not.
     assert (
         sq.is_upgrade({"label": "40B", "row": 40, "position": "middle", "cabin": Y}, held_middle)
