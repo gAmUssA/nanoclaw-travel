@@ -650,3 +650,38 @@ def test_initialize_must_be_a_real_initialize_result(init_body, error_type):
             client.get_flight(flight_id=1)
     assert exc_info.value.error_type == error_type
     assert methods == ["initialize"]
+
+
+@pytest.mark.parametrize("error_type", [None, 7, ""], ids=["null", "int", "empty"])
+def test_non_string_error_type_is_malformed(error_type):
+    """#327 review: a null `_meta.error_type` must not surface as None, which
+    the sync-health counter would read as a clean pass."""
+    client = ByAirClient(SYNTH_URL)
+
+    def bad_error_type():
+        body = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "isError": True,
+                "_meta": {"error_type": error_type},
+                "content": [{"type": "text", "text": "upstream failure"}],
+            },
+        }
+        return _FakeResponse(json.dumps(body).encode(), {"content-type": "application/json"})
+
+    with patch("urllib.request.urlopen", side_effect=_stateless_fake([], bad_error_type)):
+        with pytest.raises(ByAirError) as exc_info:
+            client.get_flight(flight_id=1)
+    assert exc_info.value.error_type == "malformed_response"
+
+
+def test_malformed_reply_message_names_the_remedy():
+    client = ByAirClient(SYNTH_URL)
+    with patch(
+        "urllib.request.urlopen", side_effect=_stateless_fake([], lambda: _tool_response("nope"))
+    ):
+        with pytest.raises(ByAirError) as exc_info:
+            client.get_flight(flight_id=1)
+    assert "BYAIR_MCP_URL" in exc_info.value.message
+    assert "upgrade nanoclaw-travel" in exc_info.value.message

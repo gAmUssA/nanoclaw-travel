@@ -38,6 +38,12 @@ import urllib.request
 from typing import Any
 
 _PROTOCOL_VERSION = "2025-06-18"
+# Appended to every malformed-reply error so the operator knows what to do.
+_MALFORMED_REMEDY = (
+    " — check that BYAIR_MCP_URL is the current personal MCP link from "
+    "https://byairapp.com/mcp/; if it is and this persists, byAir changed its "
+    "reply shape: upgrade nanoclaw-travel, or report the response"
+)
 _CLIENT_INFO = {"name": "nanoclaw-flight-assist", "version": "0.1.0"}
 
 
@@ -210,7 +216,8 @@ class ByAirClient:
         if not isinstance(result, dict) or not isinstance(result.get("protocolVersion"), str):
             raise ByAirError(
                 "malformed_response",
-                "initialize response is not an InitializeResult (no result.protocolVersion)",
+                "initialize response is not an InitializeResult (no result.protocolVersion)"
+                + _MALFORMED_REMEDY,
             )
         self._session_id = response_headers.get("mcp-session-id") or None
 
@@ -238,7 +245,9 @@ class ByAirClient:
         body, _ = self._http_post(headers, payload)
         result = body.get("result", {}) if isinstance(body, dict) else None
         if not isinstance(result, dict):
-            raise ByAirError("malformed_response", f"{name} response has no result object")
+            raise ByAirError(
+                "malformed_response", f"{name} response has no result object" + _MALFORMED_REMEDY
+            )
         is_error = result.get("isError", False)
         content_list = result.get("content", [])
         if (
@@ -250,18 +259,23 @@ class ByAirClient:
         ):
             raise ByAirError(
                 "malformed_response",
-                f"{name} response had no text content block — got {result!r}",
+                f"{name} response had no text content block — got {result!r}" + _MALFORMED_REMEDY,
             )
         text_payload = content_list[0]["text"]
         if is_error:
             meta = result.get("_meta")
             error_type = meta.get("error_type", "unknown") if isinstance(meta, dict) else "unknown"
+            # A non-string error type (null included) is a malformed reply: a
+            # None here would read as a clean pass in the sync-health counter.
+            if not isinstance(error_type, str) or not error_type:
+                error_type = "malformed_response"
             raise ByAirError(error_type, text_payload)
         try:
             return json.loads(text_payload)
         except json.JSONDecodeError as decode_err:
             raise ByAirError(
-                "malformed_response", f"{name} text content is not JSON: {decode_err}"
+                "malformed_response",
+                f"{name} text content is not JSON: {decode_err}" + _MALFORMED_REMEDY,
             ) from decode_err
 
     def _http_post(
@@ -305,7 +319,8 @@ class ByAirClient:
                     return (json.loads(raw), response_headers)
                 except json.JSONDecodeError as decode_err:
                     raise ByAirError(
-                        "malformed_response", f"response body is not JSON: {decode_err}"
+                        "malformed_response",
+                        f"response body is not JSON: {decode_err}" + _MALFORMED_REMEDY,
                     ) from decode_err
         except urllib.error.HTTPError as http_err:
             # Session expired: 400 or 404 with a prior session-id sent.

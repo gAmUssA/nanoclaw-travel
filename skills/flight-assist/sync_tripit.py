@@ -36,7 +36,7 @@ from pathlib import Path
 _BUNDLE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BUNDLE_DIR))
 
-from byair_client import ByAirClient, ByAirError  # noqa: E402
+from byair_client import _MALFORMED_REMEDY, ByAirClient, ByAirError  # noqa: E402
 from state import (  # noqa: E402
     SYNC_HEALTH_FILE,
     StateError,
@@ -158,7 +158,8 @@ def _attach_sync_health(diff: dict, *, internal_error: str | None) -> None:
         print(
             f"flight-assist sync: health counter in {state_dir() / SYNC_HEALTH_FILE} not updated "
             f"({health_err}) — check that file's permissions and the disk's free space; if it is "
-            "corrupt or from a newer flight-assist, remove it to restart the counts",
+            "from a newer flight-assist, upgrade nanoclaw-travel (never delete it: it holds the "
+            "alert gate); only a corrupt file may be removed to restart the counts",
             file=sys.stderr,
         )
         diff["health_error"] = type(health_err).__name__
@@ -273,17 +274,22 @@ def _extract_flights(trips_payload: object) -> list[dict]:
     trips = trips_payload.get("trips") if isinstance(trips_payload, dict) else None
     if not isinstance(trips, list):
         raise ByAirError(
-            "malformed_response", "list_trips reply has no `trips` list — byAir changed its shape"
+            "malformed_response", "list_trips reply has no `trips` list" + _MALFORMED_REMEDY
         )
     flights: list[dict] = []
     for trip in trips:
         trip_flights = trip.get("flights") if isinstance(trip, dict) else None
         if not isinstance(trip_flights, list):
-            raise ByAirError("malformed_response", "list_trips trip has no `flights` list")
+            raise ByAirError(
+                "malformed_response", "list_trips trip has no `flights` list" + _MALFORMED_REMEDY
+            )
         for flight in trip_flights:
             flight_id = flight.get("id") if isinstance(flight, dict) else None
             if not isinstance(flight_id, int) or isinstance(flight_id, bool):
-                raise ByAirError("malformed_response", "list_trips flight has no integer `id`")
+                raise ByAirError(
+                    "malformed_response",
+                    "list_trips flight has no integer `id`" + _MALFORMED_REMEDY,
+                )
             # Carry the trip_id into the flight dict so the writer has it.
             flights.append({**flight, "_trip_id": trip.get("id")})
     return flights

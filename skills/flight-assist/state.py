@@ -975,7 +975,8 @@ def read_sync_health() -> dict:
     ):
         raise StateError(
             f"{path} has schema_version {version!r}; this owner reads "
-            f"{SYNC_HEALTH_SCHEMA_VERSION} — upgrade flight-assist, or remove the file"
+            f"{SYNC_HEALTH_SCHEMA_VERSION} — upgrade nanoclaw-travel; do not delete the file, it "
+            "holds the alert gate (a corrupt file, by contrast, may be removed)"
         )
     record: dict = {}
     for count_key, alerted_key, error_key in _SYNC_HEALTH_COUNTERS:

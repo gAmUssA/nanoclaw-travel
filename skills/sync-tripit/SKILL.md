@@ -14,7 +14,7 @@ This skill is an action router — pick the step that matches the user's intent 
 
 Available actions:
 - Relay a sync wake's events (the wake carries a non-empty `data.events`)
-- Diagnose a failed precheck run (the wake carries `data.reason: "precheck_internal_error"`)
+- Diagnose a failed precheck run (operator request while troubleshooting a sync that isn't updating; the run log shows `precheck_internal_error`)
 
 **Silence rule:** produces NO user-visible output of its own. The precheck delegates wake-payload composition to `flight-assist/sync_tripit.py`, which emits `wake_agent: true` only on tracked-flight added/removed events and on the sync outage events (`byair_unreachable`, `byair_recovered`, `sync_internal_error`, `sync_internal_recovered`).
 
@@ -35,7 +35,7 @@ Use its Step 3 table and its composition rules. Source-level events carry `fligh
 
 ## Step 2 — Diagnose a failed precheck run
 
-This step fires only when the precheck itself failed to execute. Gate-passed runs forward `sync_tripit.py`'s output directly; gate-failed runs emit silent `wake_agent: false`. Reaching this step means the outer-boundary handler caught an exception and emitted `{"wake_agent": false, "data": {"reason": "precheck_internal_error"}}`.
+This step fires on an operator request while troubleshooting, never on a wake. A precheck that failed to execute emits `{"wake_agent": false, "data": {"reason": "precheck_internal_error"}}` and wakes nobody; the operator finds that reason in the run log. A sync that fails repeatedly does wake the agent, through Step 1's `sync_internal_error` event.
 
 Inspect the agent-runner host log for the Python traceback the script wrote to stderr, then match against:
 
