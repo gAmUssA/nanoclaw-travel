@@ -11,8 +11,9 @@ Files written (all JSON, all carry `schema_version: 7` at the top level):
     active-flights.json               — list of currently-tracked flight_ids
     flight-<flight_id>.json           — per-flight state record
 
-    byair-health.json                 — consecutive byAir sync failures
-                                        (own `schema_version: 1`, #326)
+    sync-health.json                  — consecutive sync failures, byAir
+                                        and internal (own `schema_version: 1`,
+                                        #326)
 
 Writes are atomic: write-to-tmp + os.replace, so a kill mid-write
 doesn't leave a half-written file on disk.
@@ -72,8 +73,8 @@ CONFIG_FILE = "config.json"
 ACTIVE_FLIGHTS_FILE = "active-flights.json"
 CURRENT_LOCATION_FILE = "current-location.json"
 CURRENT_LOCATION_SCHEMA_VERSION = 1
-BYAIR_HEALTH_FILE = "byair-health.json"
-BYAIR_HEALTH_SCHEMA_VERSION = 1
+SYNC_HEALTH_FILE = "sync-health.json"
+SYNC_HEALTH_SCHEMA_VERSION = 1
 _FLIGHT_FILE_PREFIX = "flight-"
 _FLIGHT_FILE_SUFFIX = ".json"
 
@@ -920,80 +921,86 @@ def list_flight_state_ids() -> list[int]:
     return sorted(ids)
 
 
-def _default_byair_health() -> dict:
-    return {"consecutive_failures": 0, "alerted": False, "last_error": None}
+_SYNC_HEALTH_COUNTERS = (
+    ("consecutive_failures", "alerted", "last_error"),
+    ("internal_failures", "internal_alerted", "last_internal_error"),
+)
 
 
-def read_byair_health() -> dict:
-    """Return the byAir sync-health record; owner read (`sync_tripit.py`).
+def _default_sync_health() -> dict:
+    record: dict = {}
+    for count_key, alerted_key, error_key in _SYNC_HEALTH_COUNTERS:
+        record.update({count_key: 0, alerted_key: False, error_key: None})
+    return record
 
-    Path: `state_dir()/byair-health.json`. Fields: `consecutive_failures`
-    (int >= 0), `alerted` (bool — an outage alert went out for the current
-    failure run), `last_error` (str or None — the latest byAir error type).
 
-    A missing file is "no failures yet" and returns the zero record. A
-    file that is unreadable, misshapen, or carries a `schema_version`
-    other than `BYAIR_HEALTH_SCHEMA_VERSION` raises `StateError` — never a
-    silent reset, which would erase `consecutive_failures` / `alerted`.
-    Version 1 is the first version, so no older version exists to migrate;
-    a future bump adds its migration here, and a newer version means the
-    owner is running behind its own state.
+def read_sync_health() -> dict:
+    """Return the sync-health record; owner read (`sync_tripit.py`).
+
+    Path: `state_dir()/sync-health.json`. Two independent failure runs:
+
+    - byAir: `consecutive_failures`, `alerted`, `last_error` — sync passes
+      that reached byAir and failed (transport or byAir error type).
+    - internal: `internal_failures`, `internal_alerted`,
+      `last_internal_error` — passes that died on a local fault before
+      producing a result (exception class name).
+
+    Each count is an int >= 0, each `*alerted` a bool, each error a str or
+    None. A missing file returns the zero record. A file that is
+    unreadable, misshapen, or carries a `schema_version` other than
+    `SYNC_HEALTH_SCHEMA_VERSION` raises `StateError` — never a silent
+    reset, which would erase a failure run. Version 1 is the first version,
+    so no older version exists to migrate; a future bump adds its
+    migration here, and a newer version means the owner is running behind
+    its own state.
     """
-    path = state_dir() / BYAIR_HEALTH_FILE
+    path = state_dir() / SYNC_HEALTH_FILE
     if not path.exists():
-        return _default_byair_health()
+        return _default_sync_health()
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as err:
         raise StateError(
             f"{path} is unreadable ({err}) — inspect it, or remove it to restart the "
-            "failure count from zero"
+            "failure counts from zero"
         ) from err
     if not isinstance(payload, dict):
-        raise StateError(f"{path} is not a JSON object — remove it to restart the count")
+        raise StateError(f"{path} is not a JSON object — remove it to restart the counts")
     version = payload.get("schema_version")
-    if version != BYAIR_HEALTH_SCHEMA_VERSION:
+    if version != SYNC_HEALTH_SCHEMA_VERSION:
         raise StateError(
             f"{path} has schema_version {version!r}; this owner reads "
-            f"{BYAIR_HEALTH_SCHEMA_VERSION} — upgrade flight-assist, or remove the file"
+            f"{SYNC_HEALTH_SCHEMA_VERSION} — upgrade flight-assist, or remove the file"
         )
-    failures = payload.get("consecutive_failures")
-    if (
-        not isinstance(failures, int)
-        or isinstance(failures, bool)
-        or failures < 0
-        or not isinstance(payload.get("alerted"), bool)
-        or "last_error" not in payload
-        or not isinstance(payload["last_error"], (str, type(None)))
-    ):
-        raise StateError(
-            f"{path} is missing or mistypes consecutive_failures / alerted / last_error — "
-            "remove it to restart the count"
+    record: dict = {}
+    for count_key, alerted_key, error_key in _SYNC_HEALTH_COUNTERS:
+        count = payload.get(count_key)
+        if (
+            not isinstance(count, int)
+            or isinstance(count, bool)
+            or count < 0
+            or not isinstance(payload.get(alerted_key), bool)
+            or error_key not in payload
+            or not isinstance(payload[error_key], (str, type(None)))
+        ):
+            raise StateError(
+                f"{path} is missing or mistypes {count_key} / {alerted_key} / {error_key} — "
+                "remove it to restart the counts"
+            )
+        record.update(
+            {count_key: count, alerted_key: payload[alerted_key], error_key: payload[error_key]}
         )
-    return {
-        "consecutive_failures": failures,
-        "alerted": payload["alerted"],
-        "last_error": payload["last_error"],
-    }
+    return record
 
 
-def write_byair_health(*, consecutive_failures: int, alerted: bool, last_error: str | None) -> None:
-    """Persist the byAir sync-health record (owner: `sync_tripit.py`)."""
-    if (
-        not isinstance(consecutive_failures, int)
-        or isinstance(consecutive_failures, bool)
-        or consecutive_failures < 0
-    ):
-        raise ValueError(
-            "write_byair_health: consecutive_failures must be an int >= 0, "
-            f"got {consecutive_failures!r}"
-        )
-    _atomic_write_json(
-        state_dir() / BYAIR_HEALTH_FILE,
-        {
-            "schema_version": BYAIR_HEALTH_SCHEMA_VERSION,
-            "consecutive_failures": consecutive_failures,
-            "alerted": bool(alerted),
-            "last_error": last_error,
-        },
-    )
+def write_sync_health(record: dict) -> None:
+    """Persist the sync-health record (owner: `sync_tripit.py`)."""
+    payload: dict = {"schema_version": SYNC_HEALTH_SCHEMA_VERSION}
+    for count_key, alerted_key, error_key in _SYNC_HEALTH_COUNTERS:
+        count = record.get(count_key)
+        if not isinstance(count, int) or isinstance(count, bool) or count < 0:
+            raise ValueError(f"write_sync_health: {count_key} must be an int >= 0, got {count!r}")
+        payload[count_key] = count
+        payload[alerted_key] = bool(record.get(alerted_key))
+        payload[error_key] = record.get(error_key)
+    _atomic_write_json(state_dir() / SYNC_HEALTH_FILE, payload)

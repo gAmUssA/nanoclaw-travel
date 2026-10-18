@@ -394,33 +394,78 @@ def test_clean_pass_below_threshold_resets_silently(state_root: Path, capsys):
         assert _source_events(quiet) == []
 
 
-def test_sync_exception_counts_toward_the_alert(state_root: Path, capsys):
-    """An exception escaping the sync (e.g. BYAIR_MCP_URL unset) is the same
-    silent failure; it counts too."""
-    payloads = []
-    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD):
-        with patch("sync_tripit.ByAirClient.from_env", side_effect=ValueError("unset")):
-            assert sync_tripit.main() == 0
-        payloads.append(json.loads(capsys.readouterr().out.strip().splitlines()[-1]))
+def _internal_failure_payload(capsys) -> dict:
+    with patch("sync_tripit.ByAirClient.from_env", side_effect=ValueError("unset")):
+        assert sync_tripit.main() == 0
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def test_local_fault_alerts_as_internal_not_byair(state_root: Path, capsys):
+    """An exception escaping the sync (e.g. BYAIR_MCP_URL unset) is a local
+    fault: it runs its own counter and never reads as a byAir outage."""
+    payloads = [
+        _internal_failure_payload(capsys) for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD)
+    ]
     assert payloads[-1]["data"]["error"] == "sync_exception"
     assert _source_events(payloads[-1]) == [
         {
-            "reason": "byair_unreachable",
+            "reason": "sync_internal_error",
             "consecutive_failures": sync_tripit._OUTAGE_ALERT_THRESHOLD,
-            "error": "sync_exception",
+            "error": "ValueError",
         }
     ]
+    recovered = _main_payload(capsys, list_trips_return={"trips": []})
+    assert _source_events(recovered) == [
+        {
+            "reason": "sync_internal_recovered",
+            "failures_before_recovery": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+        }
+    ]
+
+
+def test_local_fault_leaves_the_byair_run_untouched(state_root: Path, capsys):
+    """byAir was never asked on a local fault, so its run neither resets nor
+    advances: two byAir failures, a local fault, then a third byAir failure
+    still alerts."""
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD - 1):
+        _main_payload(capsys, list_trips_side_effect=failure)
+    assert _source_events(_internal_failure_payload(capsys)) == []
+    alert = _main_payload(capsys, list_trips_side_effect=failure)
+    assert _source_events(alert) == [
+        {
+            "reason": "byair_unreachable",
+            "consecutive_failures": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+            "error": "session_missing",
+        }
+    ]
+
+
+def _health_record(**overrides) -> dict:
+    record = {
+        "schema_version": 1,
+        "consecutive_failures": 1,
+        "alerted": False,
+        "last_error": "transport_error",
+        "internal_failures": 0,
+        "internal_alerted": False,
+        "last_internal_error": None,
+    }
+    record.update(overrides)
+    return record
+
+
+_MISSING_LAST_ERROR = _health_record()
+del _MISSING_LAST_ERROR["last_error"]
 
 
 @pytest.mark.parametrize(
     "content",
     [
         "{not json",
-        json.dumps(
-            {"schema_version": 2, "consecutive_failures": 1, "alerted": False, "last_error": None}
-        ),
+        json.dumps(_health_record(schema_version=2)),
         # Valid types but no last_error key (Copilot on #327).
-        json.dumps({"schema_version": 1, "consecutive_failures": 1, "alerted": False}),
+        json.dumps(_MISSING_LAST_ERROR),
     ],
     ids=["unparseable", "newer-schema", "missing-last-error"],
 )
@@ -428,7 +473,7 @@ def test_unusable_health_file_is_reported_not_reset(state_root: Path, capsys, co
     """An unusable record is never silently zeroed: the pass reports
     `health_error`, leaves the file as found, and still emits its payload."""
     state_root.mkdir(parents=True)
-    health = state_root / "byair-health.json"
+    health = state_root / "sync-health.json"
     health.write_text(content, encoding="utf-8")
     failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
     payload = _main_payload(capsys, list_trips_side_effect=failure)
@@ -441,20 +486,10 @@ def test_unusable_health_file_is_reported_not_reset(state_root: Path, capsys, co
 def test_health_write_failure_keeps_the_sync_diff(state_root: Path, capsys):
     """The index already holds this pass's changes, so a failed health write
     must not cost the payload its tracked_flight_added event."""
-    with patch("sync_tripit.write_byair_health", side_effect=OSError("disk full")):
-        # A prior failure makes the clean pass below try to reset the counter.
-        state_root.mkdir(parents=True)
-        (state_root / "byair-health.json").write_text(
-            json.dumps(
-                {
-                    "schema_version": 1,
-                    "consecutive_failures": 1,
-                    "alerted": False,
-                    "last_error": "transport_error",
-                }
-            ),
-            encoding="utf-8",
-        )
+    state_root.mkdir(parents=True)
+    # A prior failure makes the clean pass below try to reset the counter.
+    (state_root / "sync-health.json").write_text(json.dumps(_health_record()), encoding="utf-8")
+    with patch("sync_tripit.write_sync_health", side_effect=OSError("disk full")):
         payload = _main_payload(capsys, list_trips_return=_trips_payload([_flight(100)]))
     assert payload["wake_agent"] is True
     assert [e["event"]["reason"] for e in payload["data"]["events"]] == ["tracked_flight_added"]

@@ -1,6 +1,6 @@
 # Precheck Wake Event Payloads
 
-Reference for the `data.events` payload the precheck script emits on `wake_agent: true`. Each event is `{"flight_id": int | null, "event": {...}}`. `flight_id` is `null` only for the source-level events (`byair_unreachable`, `byair_recovered`). Consumed by `SKILL.md` Step 3 to compose user-facing notifications.
+Reference for the `data.events` payload the precheck script emits on `wake_agent: true`. Each event is `{"flight_id": int | null, "event": {...}}`. `flight_id` is `null` only for the source-level events (`byair_unreachable`, `byair_recovered`, `sync_internal_error`, `sync_internal_recovered`). Consumed by `SKILL.md` Step 3 to compose user-facing notifications.
 
 ## Event Reasons
 
@@ -189,7 +189,7 @@ These concern byAir itself, so the wrapper carries `"flight_id": null`. There is
 {"reason": "byair_unreachable", "consecutive_failures": 3, "error": "session_missing"}
 ```
 
-Fires once per failure run, when consecutive failed sync passes reach the threshold (`_OUTAGE_ALERT_THRESHOLD` in `sync_tripit.py`). `error` is the latest byAir error type (`transport_error`, `session_missing`, …). Until byAir answers again, flight notifications (delays, gate changes, boarding) are not arriving.
+Fires once per failure run, when consecutive sync passes that reached byAir and failed hit the threshold (`_OUTAGE_ALERT_THRESHOLD` in `sync_tripit.py`). `error` is the latest byAir error type (`transport_error`, `session_missing`, …). Until the sync recovers, new or changed trips do not reach the tracking index. Polling of already-tracked flights is separate; its failures show as `error: "byair_poll_failed"` in the flight-assist precheck payload.
 
 #### `byair_recovered`
 
@@ -198,6 +198,22 @@ Fires once per failure run, when consecutive failed sync passes reach the thresh
 ```
 
 Fires on the first clean sync pass after a `byair_unreachable` alert.
+
+#### `sync_internal_error`
+
+```json
+{"reason": "sync_internal_error", "consecutive_failures": 3, "error": "ValueError"}
+```
+
+Fires once per failure run, when consecutive passes that died on a local fault (configuration, state, or a bug) hit the same threshold. `error` is the exception class. The traceback is in the sync-tripit precheck's stderr in the host log. byAir itself is not implicated.
+
+#### `sync_internal_recovered`
+
+```json
+{"reason": "sync_internal_recovered", "failures_before_recovery": 4}
+```
+
+Fires on the first pass that produces a result after a `sync_internal_error` alert.
 
 ## Composition Discipline
 

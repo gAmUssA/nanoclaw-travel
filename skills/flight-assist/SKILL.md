@@ -86,10 +86,12 @@ The reason → notification mapping for the documented events:
 | `removed_upstream` | "Flight `<code>` no longer tracked upstream — remove from active trips if intentional." Don't auto-delete; let the user confirm |
 | `tracked_flight_added` | Silent in most cases (the daily sync added a flight to the tracking index). Surface only when the user explicitly asked "what's new" or when `data.events` contains nothing else worth reporting |
 | `tracked_flight_removed` | "Flight `<code>` stopped tracking — daily sync removed it from the active-flights index." Treat as informational, not actionable |
-| `byair_unreachable` | "Flight sync with byAir is failing (`<consecutive_failures>` passes in a row, last error `<error>`). Flight notifications are paused until it recovers." Always send it |
-| `byair_recovered` | "byAir is reachable again. Flight notifications resumed." |
+| `byair_unreachable` | "Flight sync with byAir is failing: `<consecutive_failures>` passes in a row, last error `<error>`. New or changed trips won't reach flight tracking until it recovers. Details are in the sync-tripit host log." Always send it |
+| `byair_recovered` | "Flight sync with byAir recovered." |
+| `sync_internal_error` | "Flight sync is failing inside NanoClaw: `<consecutive_failures>` passes in a row, last error `<error>`. The traceback is in the sync-tripit host log." Always send it |
+| `sync_internal_recovered` | "Flight sync recovered." |
 
-For each event with a non-null `flight_id`, fetch the per-flight state to enrich the notification (source-level events carry `flight_id: null` and have none) (gate, terminal, ETD, ETA) by invoking `get-flight-state.py`:
+Source-level events carry `flight_id: null` and have no per-flight state. For each event with a non-null `flight_id`, fetch the per-flight state to enrich the notification (gate, terminal, ETD, ETA) by invoking `get-flight-state.py`:
 
 ```bash
 python3 /home/node/.claude/skills/tessl__flight-assist/scripts/get-flight-state.py <flight_id>

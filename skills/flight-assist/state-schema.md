@@ -56,27 +56,33 @@ Fields:
 - `schema_version` (int, required) — currently `7`
 - `flight_ids` (list of int, required) — every flight the precheck should poll
 
-### `byair-health.json` — sync failure counter (#326)
+### `sync-health.json` — sync failure counters (#326)
 
-Consecutive failed byAir sync passes, written only by `sync_tripit.py`. It versions independently of the per-flight files.
+Two independent runs of consecutive failed sync passes, written only by `sync_tripit.py`. It versions independently of the per-flight files.
 
 ```json
 {
   "schema_version": 1,
   "consecutive_failures": 0,
   "alerted": false,
-  "last_error": null
+  "last_error": null,
+  "internal_failures": 0,
+  "internal_alerted": false,
+  "last_internal_error": null
 }
 ```
 
 Fields:
 
-- `schema_version` (int, required) — `BYAIR_HEALTH_SCHEMA_VERSION`, currently `1`
-- `consecutive_failures` (int ≥ 0, required) — failed passes since the last clean one
-- `alerted` (bool, required) — a `byair_unreachable` event went out for the current failure run
+- `schema_version` (int, required) — `SYNC_HEALTH_SCHEMA_VERSION`, currently `1`
+- `consecutive_failures` (int ≥ 0, required) — passes that reached byAir and failed since the last clean one
+- `alerted` (bool, required) — a `byair_unreachable` event went out for the current byAir run
 - `last_error` (str or null, required) — the latest byAir error type
+- `internal_failures` (int ≥ 0, required) — passes that died on a local fault before producing a result
+- `internal_alerted` (bool, required) — a `sync_internal_error` event went out for the current internal run
+- `last_internal_error` (str or null, required) — the exception class of the latest local fault
 
-Reader contract: `read_byair_health()` returns the zero record for a missing file. An unreadable or misshapen file, or a `schema_version` other than `1`, raises `StateError`. `sync_tripit.py` reports that as `health_error` in its payload and on stderr, and still emits the sync's diff. Version 1 has no predecessor to migrate; a bump adds its migration to `read_byair_health()`.
+Reader contract: `read_sync_health()` returns the zero record for a missing file. An unreadable or misshapen file, or a `schema_version` other than `1`, raises `StateError`. `sync_tripit.py` reports that as `health_error` in its payload and on stderr, and still emits the sync's diff. Version 1 has no predecessor to migrate; a bump adds its migration to `read_sync_health()`.
 
 ### `current-location.json`
 

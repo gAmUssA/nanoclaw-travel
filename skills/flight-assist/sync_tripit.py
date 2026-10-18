@@ -41,11 +41,11 @@ from state import (  # noqa: E402
     StateError,
     delete_flight_state,
     read_active_flights,
-    read_byair_health,
     read_flight_state,
+    read_sync_health,
     write_active_flights,
-    write_byair_health,
     write_flight_state,
+    write_sync_health,
 )
 
 # Per-call timeout for the byAir HTTP client below. `ByAirClient`'s own
@@ -79,15 +79,15 @@ def main() -> int:
     # run; catch it here, emit safe-shape JSON, return 0.
     try:
         diff = _run_sync(now_utc=datetime.now(timezone.utc))
-        _attach_byair_health(diff)
+        _attach_sync_health(diff, internal_error=None)
         _emit_diff(diff)
         return 0
-    except Exception:  # noqa: BLE001 — outer-boundary-process-contract
+    except Exception as exc:  # noqa: BLE001 — outer-boundary-process-contract
         traceback.print_exc(file=sys.stderr)
         diff = {"added": [], "removed": [], "error": "sync_exception"}
-        # A persistent exception is the same silent outage as a byAir error,
-        # so it counts toward the alert too (#326).
-        _attach_byair_health(diff)
+        # A local fault (config, state, bug) is not a byAir outage: it runs
+        # its own counter and alert, and leaves the byAir counter alone (#326).
+        _attach_sync_health(diff, internal_error=type(exc).__name__)
         _emit_diff(diff)
         return 0
 
@@ -138,54 +138,82 @@ def _emit_diff(diff: dict) -> None:
     print(json.dumps(payload, separators=(",", ":")))
 
 
-def _attach_byair_health(diff: dict) -> None:
-    """Record this pass in the health counter; attach the resulting events.
+def _attach_sync_health(diff: dict, *, internal_error: str | None) -> None:
+    """Record this pass in the sync-health counters; attach resulting events.
 
-    The counter is bookkeeping beside the sync, never a gate on it: by now
+    The counters are bookkeeping beside the sync, never a gate on it: by now
     the active-flights index may already hold this pass's changes, so a
     failed health read or write must not cost the diff its added/removed
     events. The failure is reported on stderr and as `health_error` in the
     payload instead.
     """
+    byair_error = None if internal_error is not None else diff.get("error")
     try:
-        diff["source_events"] = _record_byair_health(diff.get("error"))
+        diff["source_events"] = _record_sync_health(
+            byair_error=byair_error, internal_error=internal_error
+        )
     except (StateError, OSError, ValueError) as health_err:
         print(f"flight-assist sync: health counter not updated: {health_err}", file=sys.stderr)
         diff["health_error"] = type(health_err).__name__
 
 
-def _record_byair_health(error: str | None) -> list[dict]:
-    """Update the consecutive-failure counter; return source-level events.
+def _advance(
+    record: dict,
+    keys: tuple[str, str, str],
+    error: str | None,
+    reasons: tuple[str, str],
+) -> list[dict]:
+    """Advance one failure run in `record` in place; return its events.
 
-    A failed pass (`error` set) increments the counter and returns one
-    `byair_unreachable` event when the counter reaches
-    `_OUTAGE_ALERT_THRESHOLD` with no alert sent yet for this run. A clean
-    pass resets the counter and returns `byair_recovered` when an alert had
-    gone out. Before #326 a failed pass looked exactly like a quiet one, and
+    A failure increments the count and returns the alert event once the
+    count reaches `_OUTAGE_ALERT_THRESHOLD` with no alert sent yet for this
+    run. A success resets the run and returns the recovery event when an
+    alert had gone out.
+    """
+    count_key, alerted_key, error_key = keys
+    alert_reason, recovered_reason = reasons
+    if error is not None:
+        record[count_key] += 1
+        record[error_key] = error
+        if record[count_key] >= _OUTAGE_ALERT_THRESHOLD and not record[alerted_key]:
+            record[alerted_key] = True
+            return [
+                {"reason": alert_reason, "consecutive_failures": record[count_key], "error": error}
+            ]
+        return []
+    events = []
+    if record[alerted_key]:
+        events.append({"reason": recovered_reason, "failures_before_recovery": record[count_key]})
+    record.update({count_key: 0, alerted_key: False, error_key: None})
+    return events
+
+
+def _record_sync_health(*, byair_error: str | None, internal_error: str | None) -> list[dict]:
+    """Update both failure runs for this pass; return source-level events.
+
+    A pass that died on a local fault advances the internal run and leaves
+    the byAir run untouched (byAir was never asked). A pass that produced a
+    result clears the internal run and advances the byAir run by its
+    outcome. Before #326 a failed pass looked exactly like a quiet one, and
     897 consecutive failures raised nothing.
     """
-    health = read_byair_health()
-    if error is not None:
-        failures = health["consecutive_failures"] + 1
-        events: list[dict] = []
-        alerted = health["alerted"]
-        if failures >= _OUTAGE_ALERT_THRESHOLD and not alerted:
-            events.append(
-                {"reason": "byair_unreachable", "consecutive_failures": failures, "error": error}
-            )
-            alerted = True
-        write_byair_health(consecutive_failures=failures, alerted=alerted, last_error=error)
-        return events
-    events = []
-    if health["alerted"]:
-        events.append(
-            {
-                "reason": "byair_recovered",
-                "failures_before_recovery": health["consecutive_failures"],
-            }
+    health = read_sync_health()
+    record = dict(health)
+    events = _advance(
+        record,
+        ("internal_failures", "internal_alerted", "last_internal_error"),
+        internal_error,
+        ("sync_internal_error", "sync_internal_recovered"),
+    )
+    if internal_error is None:
+        events += _advance(
+            record,
+            ("consecutive_failures", "alerted", "last_error"),
+            byair_error,
+            ("byair_unreachable", "byair_recovered"),
         )
-    if health["consecutive_failures"] or health["alerted"]:
-        write_byair_health(consecutive_failures=0, alerted=False, last_error=None)
+    if record != health:
+        write_sync_health(record)
     return events
 
 
