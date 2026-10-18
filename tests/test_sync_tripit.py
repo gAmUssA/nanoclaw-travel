@@ -412,19 +412,54 @@ def test_sync_exception_counts_toward_the_alert(state_root: Path, capsys):
     ]
 
 
-def test_corrupt_health_file_reads_as_zero(state_root: Path, capsys):
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{not json",
+        json.dumps(
+            {"schema_version": 2, "consecutive_failures": 1, "alerted": False, "last_error": None}
+        ),
+        # Valid types but no last_error key (Copilot on #327).
+        json.dumps({"schema_version": 1, "consecutive_failures": 1, "alerted": False}),
+    ],
+    ids=["unparseable", "newer-schema", "missing-last-error"],
+)
+def test_unusable_health_file_is_reported_not_reset(state_root: Path, capsys, content: str):
+    """An unusable record is never silently zeroed: the pass reports
+    `health_error`, leaves the file as found, and still emits its payload."""
     state_root.mkdir(parents=True)
-    (state_root / "byair-health.json").write_text("{not json", encoding="utf-8")
+    health = state_root / "byair-health.json"
+    health.write_text(content, encoding="utf-8")
     failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
     payload = _main_payload(capsys, list_trips_side_effect=failure)
+    assert payload["data"]["error"] == "session_missing"
+    assert payload["data"]["health_error"] == "StateError"
     assert _source_events(payload) == []
-    record = json.loads((state_root / "byair-health.json").read_text(encoding="utf-8"))
-    assert record == {
-        "schema_version": 1,
-        "consecutive_failures": 1,
-        "alerted": False,
-        "last_error": "session_missing",
-    }
+    assert health.read_text(encoding="utf-8") == content
+
+
+def test_health_write_failure_keeps_the_sync_diff(state_root: Path, capsys):
+    """The index already holds this pass's changes, so a failed health write
+    must not cost the payload its tracked_flight_added event."""
+    with patch("sync_tripit.write_byair_health", side_effect=OSError("disk full")):
+        # A prior failure makes the clean pass below try to reset the counter.
+        state_root.mkdir(parents=True)
+        (state_root / "byair-health.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "consecutive_failures": 1,
+                    "alerted": False,
+                    "last_error": "transport_error",
+                }
+            ),
+            encoding="utf-8",
+        )
+        payload = _main_payload(capsys, list_trips_return=_trips_payload([_flight(100)]))
+    assert payload["wake_agent"] is True
+    assert [e["event"]["reason"] for e in payload["data"]["events"]] == ["tracked_flight_added"]
+    assert payload["data"]["health_error"] == "OSError"
+    assert read_active_flights() == [100]
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,6 @@
 # Precheck Wake Event Payloads
 
-Reference for the `data.events` payload the precheck script emits on `wake_agent: true`. Each event is `{"flight_id": int, "event": {...}}`. Consumed by `SKILL.md` Step 3 to compose user-facing notifications.
+Reference for the `data.events` payload the precheck script emits on `wake_agent: true`. Each event is `{"flight_id": int | null, "event": {...}}`. `flight_id` is `null` only for the source-level events (`byair_unreachable`, `byair_recovered`). Consumed by `SKILL.md` Step 3 to compose user-facing notifications.
 
 ## Event Reasons
 

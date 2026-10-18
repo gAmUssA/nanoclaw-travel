@@ -1,6 +1,6 @@
 ---
 name: sync-tripit
-description: "Adaptive scheduler for the TripIt/byAir refresh of active-flights.json. Precheck-gated to keep byAir polling responsive on flight days and idle between travel windows. Use when active-flights.json isn't updating, byAir polling cadence isn't matching flight density, troubleshooting flight tracking / flight notifications / flight status updates / travel schedule refresh, or setting up flight-assist on a new install. The gate predicate and threshold constants live in precheck.py."
+description: "Adaptive scheduler for the TripIt/byAir refresh of active-flights.json. Precheck-gated to keep byAir polling responsive on flight days and idle between travel windows. Actions: relay a sync wake's events (tracked-flight changes, byAir outage and recovery), or diagnose a failed precheck run. Use when active-flights.json isn't updating, byAir polling cadence isn't matching flight density, troubleshooting flight tracking / flight notifications / flight status updates / travel schedule refresh, or setting up flight-assist on a new install. The gate predicate and threshold constants live in precheck.py."
 cadence: "*/5 * * * *"
 agentModel: "claude-haiku-4-5-20251001"
 script: "precheck.py"
@@ -10,18 +10,32 @@ user-invocable: false
 
 # sync-tripit (adaptive scheduler)
 
-Process steps in order. Do not skip ahead.
+This skill is an action router — pick the step that matches the user's intent and execute only that step. Do not run other steps; do not parallelize.
 
-**Silence rule:** produces NO user-visible output of its own. The precheck delegates wake-payload composition to `flight-assist/sync_tripit.py`, which emits `wake_agent: true` only on tracked-flight added/removed events and on the byAir outage events (`byair_unreachable`, `byair_recovered`). Compose those events with the flight-assist reason table: `Skill(skill: "flight-assist")`, Step 3.
+Available actions:
+- Relay a sync wake's events (the wake carries a non-empty `data.events`)
+- Diagnose a failed precheck run (the wake carries `data.reason: "precheck_internal_error"`)
+
+**Silence rule:** produces NO user-visible output of its own. The precheck delegates wake-payload composition to `flight-assist/sync_tripit.py`, which emits `wake_agent: true` only on tracked-flight added/removed events and on the byAir outage events (`byair_unreachable`, `byair_recovered`).
 
 ## Hard rules
 
 - **No byAir call without the gate passing.** `precheck.py:_should_sync_now()` is the sole authority on whether a 5-min fire becomes a byAir round-trip.
 - **No state writes here.** All state mutations live in `flight-assist/sync_tripit.py` + `flight-assist/state.py`.
 
-## Step 1 — Diagnose a failed precheck run
+## Step 1 — Relay sync wake events
 
-This step fires only when the precheck itself failed to execute. Gate-passed runs forward `sync_tripit.py`'s output directly; gate-failed runs emit silent `wake_agent: false`. Reaching this skill body means the outer-boundary handler caught an exception and emitted `{"wake_agent": false, "data": {"reason": "precheck_internal_error"}}`.
+This step fires when the wake carries a non-empty `data.events` list. Compose one notification per event with the flight-assist reason table:
+
+```
+Skill(skill: "flight-assist")
+```
+
+Use its Step 3 table and its composition rules. Source-level events (`byair_unreachable`, `byair_recovered`) carry `flight_id: null` and need no per-flight state. Finish here.
+
+## Step 2 — Diagnose a failed precheck run
+
+This step fires only when the precheck itself failed to execute. Gate-passed runs forward `sync_tripit.py`'s output directly; gate-failed runs emit silent `wake_agent: false`. Reaching this step means the outer-boundary handler caught an exception and emitted `{"wake_agent": false, "data": {"reason": "precheck_internal_error"}}`.
 
 Inspect the agent-runner host log for the Python traceback the script wrote to stderr, then match against:
 

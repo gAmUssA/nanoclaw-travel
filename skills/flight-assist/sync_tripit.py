@@ -38,6 +38,7 @@ sys.path.insert(0, str(_BUNDLE_DIR))
 
 from byair_client import ByAirClient, ByAirError  # noqa: E402
 from state import (  # noqa: E402
+    StateError,
     delete_flight_state,
     read_active_flights,
     read_byair_health,
@@ -78,19 +79,15 @@ def main() -> int:
     # run; catch it here, emit safe-shape JSON, return 0.
     try:
         diff = _run_sync(now_utc=datetime.now(timezone.utc))
-        diff["source_events"] = _record_byair_health(diff.get("error"))
+        _attach_byair_health(diff)
         _emit_diff(diff)
         return 0
     except Exception:  # noqa: BLE001 — outer-boundary-process-contract
         traceback.print_exc(file=sys.stderr)
         diff = {"added": [], "removed": [], "error": "sync_exception"}
         # A persistent exception is the same silent outage as a byAir error,
-        # so it counts toward the alert too (#326). A failure to record it
-        # must not break the stdout contract, so it is reported and skipped.
-        try:
-            diff["source_events"] = _record_byair_health("sync_exception")
-        except (OSError, ValueError) as health_err:
-            print(f"flight-assist sync: health counter not updated: {health_err}", file=sys.stderr)
+        # so it counts toward the alert too (#326).
+        _attach_byair_health(diff)
         _emit_diff(diff)
         return 0
 
@@ -136,7 +133,25 @@ def _emit_diff(diff: dict) -> None:
     payload = {"wake_agent": has_events, "data": {"events": events}}
     if "error" in diff:
         payload["data"]["error"] = diff["error"]
+    if "health_error" in diff:
+        payload["data"]["health_error"] = diff["health_error"]
     print(json.dumps(payload, separators=(",", ":")))
+
+
+def _attach_byair_health(diff: dict) -> None:
+    """Record this pass in the health counter; attach the resulting events.
+
+    The counter is bookkeeping beside the sync, never a gate on it: by now
+    the active-flights index may already hold this pass's changes, so a
+    failed health read or write must not cost the diff its added/removed
+    events. The failure is reported on stderr and as `health_error` in the
+    payload instead.
+    """
+    try:
+        diff["source_events"] = _record_byair_health(diff.get("error"))
+    except (StateError, OSError, ValueError) as health_err:
+        print(f"flight-assist sync: health counter not updated: {health_err}", file=sys.stderr)
+        diff["health_error"] = type(health_err).__name__
 
 
 def _record_byair_health(error: str | None) -> list[dict]:

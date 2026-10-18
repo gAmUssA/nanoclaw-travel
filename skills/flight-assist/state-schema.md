@@ -76,7 +76,7 @@ Fields:
 - `alerted` (bool, required) — a `byair_unreachable` event went out for the current failure run
 - `last_error` (str or null, required) — the latest byAir error type
 
-Reader contract: `read_byair_health()` returns the zero record for a missing file, and also (with a stderr warning) for an unreadable or mismatched one. The next write replaces it.
+Reader contract: `read_byair_health()` returns the zero record for a missing file. An unreadable or misshapen file, or a `schema_version` other than `1`, raises `StateError`. `sync_tripit.py` reports that as `health_error` in its payload and on stderr, and still emits the sync's diff. Version 1 has no predecessor to migrate; a bump adds its migration to `read_byair_health()`.
 
 ### `current-location.json`
 

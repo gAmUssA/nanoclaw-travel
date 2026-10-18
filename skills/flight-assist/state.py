@@ -60,7 +60,6 @@ from __future__ import annotations
 
 import json
 import os
-import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -926,18 +925,19 @@ def _default_byair_health() -> dict:
 
 
 def read_byair_health() -> dict:
-    """Return the byAir sync-health record, or the zero record when unusable.
+    """Return the byAir sync-health record; owner read (`sync_tripit.py`).
 
-    Path: `state_dir()/byair-health.json`. Owner and sole writer is
-    `sync_tripit.py` (#326). Fields: `consecutive_failures` (int >= 0),
-    `alerted` (bool — an outage alert went out for the current failure
-    run), `last_error` (str or None — the latest byAir error type).
+    Path: `state_dir()/byair-health.json`. Fields: `consecutive_failures`
+    (int >= 0), `alerted` (bool — an outage alert went out for the current
+    failure run), `last_error` (str or None — the latest byAir error type).
 
-    A missing file is "no failures yet". An unreadable file, a wrong shape,
-    or a `schema_version` other than `BYAIR_HEALTH_SCHEMA_VERSION` also
-    reads as the zero record, with a stderr warning: this is a counter
-    feeding an alert, and the next write replaces it — wedging the sync on
-    a corrupt counter would recreate the silent outage it exists to catch.
+    A missing file is "no failures yet" and returns the zero record. A
+    file that is unreadable, misshapen, or carries a `schema_version`
+    other than `BYAIR_HEALTH_SCHEMA_VERSION` raises `StateError` — never a
+    silent reset, which would erase `consecutive_failures` / `alerted`.
+    Version 1 is the first version, so no older version exists to migrate;
+    a future bump adds its migration here, and a newer version means the
+    owner is running behind its own state.
     """
     path = state_dir() / BYAIR_HEALTH_FILE
     if not path.exists():
@@ -945,20 +945,31 @@ def read_byair_health() -> dict:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError, UnicodeDecodeError) as err:
-        print(f"flight-assist state: {path} unreadable ({err}); resetting", file=sys.stderr)
-        return _default_byair_health()
-    failures = payload.get("consecutive_failures") if isinstance(payload, dict) else None
+        raise StateError(
+            f"{path} is unreadable ({err}) — inspect it, or remove it to restart the "
+            "failure count from zero"
+        ) from err
+    if not isinstance(payload, dict):
+        raise StateError(f"{path} is not a JSON object — remove it to restart the count")
+    version = payload.get("schema_version")
+    if version != BYAIR_HEALTH_SCHEMA_VERSION:
+        raise StateError(
+            f"{path} has schema_version {version!r}; this owner reads "
+            f"{BYAIR_HEALTH_SCHEMA_VERSION} — upgrade flight-assist, or remove the file"
+        )
+    failures = payload.get("consecutive_failures")
     if (
-        not isinstance(payload, dict)
-        or payload.get("schema_version") != BYAIR_HEALTH_SCHEMA_VERSION
-        or not isinstance(failures, int)
+        not isinstance(failures, int)
         or isinstance(failures, bool)
         or failures < 0
         or not isinstance(payload.get("alerted"), bool)
-        or not isinstance(payload.get("last_error"), (str, type(None)))
+        or "last_error" not in payload
+        or not isinstance(payload["last_error"], (str, type(None)))
     ):
-        print(f"flight-assist state: {path} has an unexpected shape; resetting", file=sys.stderr)
-        return _default_byair_health()
+        raise StateError(
+            f"{path} is missing or mistypes consecutive_failures / alerted / last_error — "
+            "remove it to restart the count"
+        )
     return {
         "consecutive_failures": failures,
         "alerted": payload["alerted"],
