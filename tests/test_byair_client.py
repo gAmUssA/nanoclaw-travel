@@ -398,21 +398,81 @@ def test_body_read_timeout_surfaces_as_urlerror(client):
     assert isinstance(exc_info.value.__cause__, TimeoutError)
 
 
-def test_initialize_without_session_id_raises():
-    """Server response missing the mcp-session-id header is unrecoverable."""
-    client = ByAirClient(SYNTH_URL)
+def _stateless_initialize_response() -> _FakeResponse:
+    """initialize answered with a valid InitializeResult and NO mcp-session-id
+    header — the session-less Streamable HTTP mode byAir switched to (#326)."""
     body = json.dumps(
         {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}
     ).encode()
-    bad_init = _FakeResponse(body, {"content-type": "application/json"})
+    return _FakeResponse(body, {"content-type": "application/json"})
+
+
+def _stateless_fake(recorder: list, tool_response=None):
+    """urlopen stand-in for a session-less server: records every request's
+    method + headers, never issues a session id."""
 
     def fake_urlopen(request, **kwargs):
-        return bad_init
+        data = json.loads(request.data)
+        recorder.append({"method": data.get("method"), "headers": dict(request.headers)})
+        if data.get("method") == "initialize":
+            return _stateless_initialize_response()
+        if data.get("method") == "notifications/initialized":
+            return _initialized_notification_ack()
+        if tool_response is not None:
+            return tool_response()
+        return _tool_response({"id": data["params"]["arguments"].get("flight_id")})
 
-    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        with pytest.raises(ByAirError) as exc_info:
+    return fake_urlopen
+
+
+def test_stateless_server_tool_call_succeeds_without_session_header():
+    """No mcp-session-id on initialize is stateless mode, not an error: the
+    handshake completes and tools/call returns data, with no session header
+    on any request."""
+    client = ByAirClient(SYNTH_URL)
+    recorder: list = []
+    with patch("urllib.request.urlopen", side_effect=_stateless_fake(recorder)):
+        result = client.get_flight(flight_id=7)
+
+    assert result == {"id": 7}
+    assert [r["method"] for r in recorder] == [
+        "initialize",
+        "notifications/initialized",
+        "tools/call",
+    ]
+    for r in recorder:
+        assert "Mcp-session-id" not in r["headers"]
+
+
+def test_stateless_server_handshakes_once_across_calls():
+    """A stateless server must not trigger a fresh initialize before every call."""
+    client = ByAirClient(SYNTH_URL)
+    recorder: list = []
+    with patch("urllib.request.urlopen", side_effect=_stateless_fake(recorder)):
+        assert client.get_flight(flight_id=1) == {"id": 1}
+        assert client.get_flight(flight_id=2) == {"id": 2}
+
+    methods = [r["method"] for r in recorder]
+    assert methods.count("initialize") == 1
+    assert methods.count("tools/call") == 2
+
+
+def test_stateless_server_http_400_propagates_without_reinit():
+    """With no session issued there is nothing to expire: a 400 on tools/call
+    propagates as HTTPError and no re-initialize is attempted."""
+    client = ByAirClient(SYNTH_URL)
+    recorder: list = []
+
+    def bad_request():
+        raise urllib.error.HTTPError(
+            SYNTH_URL, 400, "Bad Request", Message(), io.BytesIO(b"bad request")
+        )
+
+    with patch("urllib.request.urlopen", side_effect=_stateless_fake(recorder, bad_request)):
+        with pytest.raises(urllib.error.HTTPError):
             client.get_flight(flight_id=1)
-    assert exc_info.value.error_type == "session_missing"
+
+    assert [r["method"] for r in recorder].count("initialize") == 1
 
 
 # --- airport endpoints (real BNA-sampled fixtures) ---------------------
