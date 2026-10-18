@@ -8,6 +8,10 @@ On 2026-10-07 byAir's MCP server (`byair-mcp-server 3.3.1`) stopped issuing `Mcp
 - `sync_tripit.py` keeps two consecutive-failure runs in the new `sync-health.json` (own `schema_version: 1`, documented in `state-schema.md`). Passes that reached byAir and failed emit a source-level `byair_unreachable` event (`flight_id: null`) once the run reaches `_OUTAGE_ALERT_THRESHOLD`, and `byair_recovered` on the first clean pass after an alert. Passes that died on a local fault run their own counter with `sync_internal_error` / `sync_internal_recovered`, so a config or state bug never reads as a byAir outage. All four are composed through flight-assist's Step 3 table, and sync-tripit is now an action router that relays them. The owner reader raises `StateError` on an unusable record, and the sync reports it as `health_error` while still emitting its diff.
 - The flight-assist precheck adds `error: "byair_poll_failed"` and `poll_failed_ids` to its payload when any poll failed, so a failed cycle no longer reads as a quiet one in the run log.
 
+### Move the four cadence skills to Haiku 5.5 (#324)
+
+`drive-engine`, `flight-assist`, `nightly-travel-sync` and `sync-tripit` now pin `agentModel: "claude-haiku-5-5"` (was `claude-haiku-4-5-20251001`). The orchestrator's agent image ships Agent SDK 0.3.293 with Claude Code 2.1.293, which knows the model and prices it (jbaruch/nanoclaw#990, verified on the NAS 2026-10-18). None of these skills calls Haiku directly with a thinking budget, which Haiku 5.5 rejects. Each pin now carries the renewal note the other fleet plugins use.
+
 ## 0.2.144 — 2026-09-23
 
 ### Trim skill descriptions that carry implementation detail (#965 sibling)

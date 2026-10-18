@@ -2,7 +2,8 @@
 name: drive-engine
 description: The unified drive-block engine. Manages the travel-time / driving blocks on your primary calendar — drives to your flights, to your in-person meetings, and to a trip you drive to rather than fly. Use when the user asks about drive blocks, driving time, commute or travel-time blocks on their calendar, or drives to the airport, to a meeting, or to a hotel; when the operator replies to a drive notification to skip a meeting drive ('skip', 'skip 2 and 3'); when the operator says whether a trip is a drive or a flight ('drive', 'fly'); or when the operator reports a drive block that looks wrong or missing. Also runs on its own schedule.
 cadence: "*/30 * * * *"
-agentModel: "claude-haiku-4-5-20251001"
+# agentModel renewal: no scanner tracks this pin. Re-check it on each new Claude model release and bump it in its own PR.
+agentModel: "claude-haiku-5-5"
 script: "reconcile_sweep.py"
 ---
 
