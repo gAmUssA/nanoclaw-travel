@@ -11,6 +11,9 @@ Files written (all JSON, all carry `schema_version: 7` at the top level):
     active-flights.json               — list of currently-tracked flight_ids
     flight-<flight_id>.json           — per-flight state record
 
+    byair-health.json                 — consecutive byAir sync failures
+                                        (own `schema_version: 1`, #326)
+
 Writes are atomic: write-to-tmp + os.replace, so a kill mid-write
 doesn't leave a half-written file on disk.
 
@@ -57,6 +60,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -69,6 +73,8 @@ CONFIG_FILE = "config.json"
 ACTIVE_FLIGHTS_FILE = "active-flights.json"
 CURRENT_LOCATION_FILE = "current-location.json"
 CURRENT_LOCATION_SCHEMA_VERSION = 1
+BYAIR_HEALTH_FILE = "byair-health.json"
+BYAIR_HEALTH_SCHEMA_VERSION = 1
 _FLIGHT_FILE_PREFIX = "flight-"
 _FLIGHT_FILE_SUFFIX = ".json"
 
@@ -913,3 +919,70 @@ def list_flight_state_ids() -> list[int]:
         except ValueError:
             continue
     return sorted(ids)
+
+
+def _default_byair_health() -> dict:
+    return {"consecutive_failures": 0, "alerted": False, "last_error": None}
+
+
+def read_byair_health() -> dict:
+    """Return the byAir sync-health record, or the zero record when unusable.
+
+    Path: `state_dir()/byair-health.json`. Owner and sole writer is
+    `sync_tripit.py` (#326). Fields: `consecutive_failures` (int >= 0),
+    `alerted` (bool — an outage alert went out for the current failure
+    run), `last_error` (str or None — the latest byAir error type).
+
+    A missing file is "no failures yet". An unreadable file, a wrong shape,
+    or a `schema_version` other than `BYAIR_HEALTH_SCHEMA_VERSION` also
+    reads as the zero record, with a stderr warning: this is a counter
+    feeding an alert, and the next write replaces it — wedging the sync on
+    a corrupt counter would recreate the silent outage it exists to catch.
+    """
+    path = state_dir() / BYAIR_HEALTH_FILE
+    if not path.exists():
+        return _default_byair_health()
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError) as err:
+        print(f"flight-assist state: {path} unreadable ({err}); resetting", file=sys.stderr)
+        return _default_byair_health()
+    failures = payload.get("consecutive_failures") if isinstance(payload, dict) else None
+    if (
+        not isinstance(payload, dict)
+        or payload.get("schema_version") != BYAIR_HEALTH_SCHEMA_VERSION
+        or not isinstance(failures, int)
+        or isinstance(failures, bool)
+        or failures < 0
+        or not isinstance(payload.get("alerted"), bool)
+        or not isinstance(payload.get("last_error"), (str, type(None)))
+    ):
+        print(f"flight-assist state: {path} has an unexpected shape; resetting", file=sys.stderr)
+        return _default_byair_health()
+    return {
+        "consecutive_failures": failures,
+        "alerted": payload["alerted"],
+        "last_error": payload["last_error"],
+    }
+
+
+def write_byair_health(*, consecutive_failures: int, alerted: bool, last_error: str | None) -> None:
+    """Persist the byAir sync-health record (owner: `sync_tripit.py`)."""
+    if (
+        not isinstance(consecutive_failures, int)
+        or isinstance(consecutive_failures, bool)
+        or consecutive_failures < 0
+    ):
+        raise ValueError(
+            "write_byair_health: consecutive_failures must be an int >= 0, "
+            f"got {consecutive_failures!r}"
+        )
+    _atomic_write_json(
+        state_dir() / BYAIR_HEALTH_FILE,
+        {
+            "schema_version": BYAIR_HEALTH_SCHEMA_VERSION,
+            "consecutive_failures": consecutive_failures,
+            "alerted": bool(alerted),
+            "last_error": last_error,
+        },
+    )

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import urllib.error
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
@@ -320,6 +321,110 @@ def test_sync_handles_multi_trip_payload(state_root: Path):
     assert must(read_flight_state(100))["trip_id"] == 1
     assert must(read_flight_state(200))["trip_id"] == 2
     assert must(read_flight_state(300))["trip_id"] == 2
+
+
+# ---------------------------------------------------------------------------
+# byAir health counter (#326)
+# ---------------------------------------------------------------------------
+
+
+def _main_payload(capsys, *, list_trips_side_effect=None, list_trips_return=None) -> dict:
+    with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
+        if list_trips_side_effect is not None:
+            mock_byair.return_value.list_trips.side_effect = list_trips_side_effect
+        else:
+            mock_byair.return_value.list_trips.return_value = list_trips_return
+        assert sync_tripit.main() == 0
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def _source_events(payload: dict) -> list[dict]:
+    return [e["event"] for e in payload["data"]["events"] if e["flight_id"] is None]
+
+
+def test_outage_alert_fires_once_at_threshold(state_root: Path, capsys):
+    """Failed passes stay quiet until the threshold, alert exactly once, and
+    do not re-alert while the same failure run continues."""
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    payloads = [
+        _main_payload(capsys, list_trips_side_effect=failure)
+        for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD + 1)
+    ]
+    for quiet in payloads[: sync_tripit._OUTAGE_ALERT_THRESHOLD - 1]:
+        assert quiet["wake_agent"] is False
+        assert _source_events(quiet) == []
+    alert = payloads[sync_tripit._OUTAGE_ALERT_THRESHOLD - 1]
+    assert alert["wake_agent"] is True
+    assert _source_events(alert) == [
+        {
+            "reason": "byair_unreachable",
+            "consecutive_failures": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+            "error": "session_missing",
+        }
+    ]
+    assert payloads[-1]["wake_agent"] is False
+    assert _source_events(payloads[-1]) == []
+
+
+def test_recovery_after_alert_emits_recovered_and_resets(state_root: Path, capsys):
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD):
+        _main_payload(capsys, list_trips_side_effect=failure)
+    recovered = _main_payload(capsys, list_trips_return={"trips": []})
+    assert recovered["wake_agent"] is True
+    assert _source_events(recovered) == [
+        {
+            "reason": "byair_recovered",
+            "failures_before_recovery": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+        }
+    ]
+    # The run is over: the next failures start counting from zero again.
+    after = _main_payload(capsys, list_trips_side_effect=failure)
+    assert _source_events(after) == []
+
+
+def test_clean_pass_below_threshold_resets_silently(state_root: Path, capsys):
+    failure = urllib.error.URLError("synthetic network failure")
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD - 1):
+        _main_payload(capsys, list_trips_side_effect=failure)
+    clean = _main_payload(capsys, list_trips_return={"trips": []})
+    assert _source_events(clean) == []
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD - 1):
+        quiet = _main_payload(capsys, list_trips_side_effect=failure)
+        assert _source_events(quiet) == []
+
+
+def test_sync_exception_counts_toward_the_alert(state_root: Path, capsys):
+    """An exception escaping the sync (e.g. BYAIR_MCP_URL unset) is the same
+    silent failure; it counts too."""
+    payloads = []
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD):
+        with patch("sync_tripit.ByAirClient.from_env", side_effect=ValueError("unset")):
+            assert sync_tripit.main() == 0
+        payloads.append(json.loads(capsys.readouterr().out.strip().splitlines()[-1]))
+    assert payloads[-1]["data"]["error"] == "sync_exception"
+    assert _source_events(payloads[-1]) == [
+        {
+            "reason": "byair_unreachable",
+            "consecutive_failures": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+            "error": "sync_exception",
+        }
+    ]
+
+
+def test_corrupt_health_file_reads_as_zero(state_root: Path, capsys):
+    state_root.mkdir(parents=True)
+    (state_root / "byair-health.json").write_text("{not json", encoding="utf-8")
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    payload = _main_payload(capsys, list_trips_side_effect=failure)
+    assert _source_events(payload) == []
+    record = json.loads((state_root / "byair-health.json").read_text(encoding="utf-8"))
+    assert record == {
+        "schema_version": 1,
+        "consecutive_failures": 1,
+        "alerted": False,
+        "last_error": "session_missing",
+    }
 
 
 # ---------------------------------------------------------------------------

@@ -1,5 +1,13 @@
 # Changelog
 
+### flight-assist — byAir session-less mode; sustained sync failures alert (#326)
+
+On 2026-10-07 byAir's MCP server (`byair-mcp-server 3.3.1`) stopped issuing `Mcp-Session-Id` on `initialize`. MCP 2025-06-18 allows this (the server MAY assign a session). `byair_client.py` treated the missing header as fatal (`session_missing`), so every sync and poll failed for 11 days. The failures were recorded as `precheck_skipped` with `{"events":[]}`, byte-identical to a quiet healthy cycle. The outage surfaced only on a travel day, when an AC1714 delay and a DL5081 gate change produced no notifications.
+
+- `ByAirClient` tracks the handshake separately from the session id. A server that issues no id runs stateless: one handshake per client, no session header, and no session-expiry retry. Session-issuing servers behave as before.
+- `sync_tripit.py` keeps a consecutive-failure counter in the new `byair-health.json` (own `schema_version: 1`, documented in `state-schema.md`). It emits a source-level `byair_unreachable` event (`flight_id: null`) once a failure run reaches `_OUTAGE_ALERT_THRESHOLD`, and `byair_recovered` on the first clean pass after an alert. Both are composed through flight-assist's Step 3 table.
+- The flight-assist precheck adds `error: "byair_poll_failed"` and `poll_failed_ids` to its payload when any poll failed, so a failed cycle no longer reads as a quiet one in the run log.
+
 ## 0.2.144 — 2026-09-23
 
 ### Trim skill descriptions that carry implementation detail (#965 sibling)

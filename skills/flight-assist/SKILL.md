@@ -60,7 +60,7 @@ It converges the calendar to byAir truth — creates/shifts the boarding block, 
 
 It prints single-line JSON: `{"status": "...", "planned": N, "executed": N, "archived": N, "failed": [...], "airport_drive": {...}}`. Output keys vary by `status`: `byair_calendar_id` and `archived` are present only when a cycle ran (`ok` / `no_flights`) and are omitted on `no_calendar`, so do not depend on a key that may be absent. `status: "ok"` means a cycle ran. `no_calendar` (no flight calendar resolved from config), `no_flights` (nothing tracked), or `{"status": "error", "error": "gateway"}` (the OneCLI gateway is not authenticating the requests) or `{"status": "error", "error": "tier"}` (this agent's tier is gated from Google by design) all mean reconciliation is inactive this cycle. The `airport_drive` object is now a fixed retired marker — `{"status": "retired", "engine": "drive-engine"}` — since airport drives moved to the unified drive-engine (#156); it is bookkeeping only, absent on the error exits. Treat a non-empty `failed` list (those ops retry next cycle) as expected: proceed to the notification below. Reconcile output is calendar bookkeeping, never a user-facing message — do not surface it; proceed silently regardless of its result.
 
-Then compose the notification. Each event is `{"flight_id": int, "event": {"reason": "...", ...}}`. Compose one human-readable notification per event.
+Then compose the notification. Each event is `{"flight_id": int | null, "event": {"reason": "...", ...}}`. Compose one human-readable notification per event.
 
 The full event-shape contract is in `references/event-payloads.md`; consult it when an event's `reason` is unfamiliar.
 
@@ -86,8 +86,10 @@ The reason → notification mapping for the documented events:
 | `removed_upstream` | "Flight `<code>` no longer tracked upstream — remove from active trips if intentional." Don't auto-delete; let the user confirm |
 | `tracked_flight_added` | Silent in most cases (the daily sync added a flight to the tracking index). Surface only when the user explicitly asked "what's new" or when `data.events` contains nothing else worth reporting |
 | `tracked_flight_removed` | "Flight `<code>` stopped tracking — daily sync removed it from the active-flights index." Treat as informational, not actionable |
+| `byair_unreachable` | "Flight sync with byAir is failing (`<consecutive_failures>` passes in a row, last error `<error>`). Flight notifications are paused until it recovers." Always send it |
+| `byair_recovered` | "byAir is reachable again. Flight notifications resumed." |
 
-For each event, fetch the per-flight state to enrich the notification (gate, terminal, ETD, ETA) by invoking `get-flight-state.py`:
+For each event with a non-null `flight_id`, fetch the per-flight state to enrich the notification (source-level events carry `flight_id: null` and have none) (gate, terminal, ETD, ETA) by invoking `get-flight-state.py`:
 
 ```bash
 python3 /home/node/.claude/skills/tessl__flight-assist/scripts/get-flight-state.py <flight_id>

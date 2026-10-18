@@ -179,6 +179,26 @@ Fires when a flight appeared in `byair_list_trips` that wasn't on the active-fli
 
 Fires when a previously-tracked flight is no longer in `byair_list_trips` (e.g., the trip expired or the user untracked it upstream). The sync script deletes the per-flight state file — the event payload captures the prior-state metadata BEFORE the delete so the agent's composition template has `code` to render. Reading state by `flight_id` after this event arrives returns None (state already deleted).
 
+### Source-level (from `sync_tripit.py`, #326)
+
+These concern byAir itself, so the wrapper carries `"flight_id": null`. There is no per-flight state to read for them.
+
+#### `byair_unreachable`
+
+```json
+{"reason": "byair_unreachable", "consecutive_failures": 3, "error": "session_missing"}
+```
+
+Fires once per failure run, when consecutive failed sync passes reach the threshold (`_OUTAGE_ALERT_THRESHOLD` in `sync_tripit.py`). `error` is the latest byAir error type (`transport_error`, `session_missing`, …). Until byAir answers again, flight notifications (delays, gate changes, boarding) are not arriving.
+
+#### `byair_recovered`
+
+```json
+{"reason": "byair_recovered", "failures_before_recovery": 5}
+```
+
+Fires on the first clean sync pass after a `byair_unreachable` alert.
+
 ## Composition Discipline
 
 - One event = one notification line, unless multiple events for the same `flight_id` arrive in one cycle (then merge per the ordering rule in SKILL.md Step 3).

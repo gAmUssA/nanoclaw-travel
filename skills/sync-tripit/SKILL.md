@@ -12,7 +12,7 @@ user-invocable: false
 
 Process steps in order. Do not skip ahead.
 
-**Silence rule:** produces NO user-visible output. The precheck delegates wake-payload composition to `flight-assist/sync_tripit.py`, which emits `wake_agent: true` only on tracked-flight added/removed events.
+**Silence rule:** produces NO user-visible output of its own. The precheck delegates wake-payload composition to `flight-assist/sync_tripit.py`, which emits `wake_agent: true` only on tracked-flight added/removed events and on the byAir outage events (`byair_unreachable`, `byair_recovered`). Compose those events with the flight-assist reason table: `Skill(skill: "flight-assist")`, Step 3.
 
 ## Hard rules
 

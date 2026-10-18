@@ -56,6 +56,28 @@ Fields:
 - `schema_version` (int, required) — currently `7`
 - `flight_ids` (list of int, required) — every flight the precheck should poll
 
+### `byair-health.json` — sync failure counter (#326)
+
+Consecutive failed byAir sync passes, written only by `sync_tripit.py`. It versions independently of the per-flight files.
+
+```json
+{
+  "schema_version": 1,
+  "consecutive_failures": 0,
+  "alerted": false,
+  "last_error": null
+}
+```
+
+Fields:
+
+- `schema_version` (int, required) — `BYAIR_HEALTH_SCHEMA_VERSION`, currently `1`
+- `consecutive_failures` (int ≥ 0, required) — failed passes since the last clean one
+- `alerted` (bool, required) — a `byair_unreachable` event went out for the current failure run
+- `last_error` (str or null, required) — the latest byAir error type
+
+Reader contract: `read_byair_health()` returns the zero record for a missing file, and also (with a stderr warning) for an unreadable or mismatched one. The next write replaces it.
+
 ### `current-location.json`
 
 Latest known user location. **Owner is the host orchestrator**, not flight-assist — the host writes this file as Telegram live-location updates and message metadata arrive. flight-assist is a non-owner reader per `coding-policy: stateful-artifacts`: it consults the snapshot to resolve the time-to-leave origin (ladder lives in `precheck._resolve_time_to_leave_origin`), validates the documented shape, and returns `None` on any mismatch instead of raising or migrating.

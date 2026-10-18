@@ -40,8 +40,10 @@ from byair_client import ByAirClient, ByAirError  # noqa: E402
 from state import (  # noqa: E402
     delete_flight_state,
     read_active_flights,
+    read_byair_health,
     read_flight_state,
     write_active_flights,
+    write_byair_health,
     write_flight_state,
 )
 
@@ -61,6 +63,12 @@ from state import (  # noqa: E402
 # the precheck path. Per #212; same inner-vs-outer collision as #28.
 _BYAIR_CALL_TIMEOUT_SECONDS = 20.0
 
+# Consecutive failed sync passes before the outage alert fires (#326). On a
+# flight day the gate syncs every 5 min, so 3 is 15 min of silence; between
+# trips the gate syncs about every 6 h. One alert per failure run, plus one
+# recovery notice when a pass succeeds after an alert.
+_OUTAGE_ALERT_THRESHOLD = 3
+
 
 def main() -> int:
     # outer-boundary-process-contract: same shape as precheck.py.
@@ -70,11 +78,20 @@ def main() -> int:
     # run; catch it here, emit safe-shape JSON, return 0.
     try:
         diff = _run_sync(now_utc=datetime.now(timezone.utc))
+        diff["source_events"] = _record_byair_health(diff.get("error"))
         _emit_diff(diff)
         return 0
     except Exception:  # noqa: BLE001 — outer-boundary-process-contract
         traceback.print_exc(file=sys.stderr)
-        _emit_diff({"added": [], "removed": [], "error": "sync_exception"})
+        diff = {"added": [], "removed": [], "error": "sync_exception"}
+        # A persistent exception is the same silent outage as a byAir error,
+        # so it counts toward the alert too (#326). A failure to record it
+        # must not break the stdout contract, so it is reported and skipped.
+        try:
+            diff["source_events"] = _record_byair_health("sync_exception")
+        except (OSError, ValueError) as health_err:
+            print(f"flight-assist sync: health counter not updated: {health_err}", file=sys.stderr)
+        _emit_diff(diff)
         return 0
 
 
@@ -112,11 +129,49 @@ def _emit_diff(diff: dict) -> None:
                 },
             }
         )
+    for source_event in diff.get("source_events", []) or []:
+        # Source-level events concern byAir itself, not one flight.
+        events.append({"flight_id": None, "event": source_event})
     has_events = bool(events)
     payload = {"wake_agent": has_events, "data": {"events": events}}
     if "error" in diff:
         payload["data"]["error"] = diff["error"]
     print(json.dumps(payload, separators=(",", ":")))
+
+
+def _record_byair_health(error: str | None) -> list[dict]:
+    """Update the consecutive-failure counter; return source-level events.
+
+    A failed pass (`error` set) increments the counter and returns one
+    `byair_unreachable` event when the counter reaches
+    `_OUTAGE_ALERT_THRESHOLD` with no alert sent yet for this run. A clean
+    pass resets the counter and returns `byair_recovered` when an alert had
+    gone out. Before #326 a failed pass looked exactly like a quiet one, and
+    897 consecutive failures raised nothing.
+    """
+    health = read_byair_health()
+    if error is not None:
+        failures = health["consecutive_failures"] + 1
+        events: list[dict] = []
+        alerted = health["alerted"]
+        if failures >= _OUTAGE_ALERT_THRESHOLD and not alerted:
+            events.append(
+                {"reason": "byair_unreachable", "consecutive_failures": failures, "error": error}
+            )
+            alerted = True
+        write_byair_health(consecutive_failures=failures, alerted=alerted, last_error=error)
+        return events
+    events = []
+    if health["alerted"]:
+        events.append(
+            {
+                "reason": "byair_recovered",
+                "failures_before_recovery": health["consecutive_failures"],
+            }
+        )
+    if health["consecutive_failures"] or health["alerted"]:
+        write_byair_health(consecutive_failures=0, alerted=False, last_error=None)
+    return events
 
 
 def _run_sync(*, now_utc: datetime) -> dict:
