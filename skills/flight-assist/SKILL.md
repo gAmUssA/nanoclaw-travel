@@ -2,7 +2,8 @@
 name: flight-assist
 description: On a byAir precheck wake event, reconciles the operator's managed calendar events and composes a user-facing flight notification — delay, gate change, cancellation, boarding, connection risk, inbound delay, time to leave, baggage carousel, day-before check, or arrival logistics. Also configures the plugin (verify credentials, set home base). Use when a tracked-flight wake event needs a notification, or when setting up or diagnosing flight-assist — 'diagnose flight-assist', 'set flight-assist home base', 'configure flight-assist'.
 cadence: "*/2 * * * *"
-agentModel: "claude-haiku-4-5-20251001"
+# agentModel renewal: no scanner tracks this pin. Re-check it on each new Claude model release and bump it in its own PR.
+agentModel: "claude-haiku-5-5"
 script: "precheck.py"
 precheck_timeout_ms: 30000
 ---
