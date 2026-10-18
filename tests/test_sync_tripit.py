@@ -443,12 +443,32 @@ def test_local_fault_leaves_the_byair_run_untouched(state_root: Path, capsys):
 
 @pytest.mark.parametrize(
     "trips_payload",
-    [[], {"trips": "nope"}, {"trips": [["not", "a", "trip"]]}, {"trips": [{"flights": [7]}]}],
-    ids=["list", "trips-not-list", "trip-not-object", "flight-not-object"],
+    [
+        [],
+        {},
+        {"trips": None},
+        {"trips": "nope"},
+        {"trips": [["not", "a", "trip"]]},
+        {"trips": [{"id": 1}]},
+        {"trips": [{"flights": [7]}]},
+        {"trips": [{"flights": [{"code": "XX1"}]}]},
+    ],
+    ids=[
+        "list",
+        "trips-missing",
+        "trips-null",
+        "trips-not-list",
+        "trip-not-object",
+        "flights-missing",
+        "flight-not-object",
+        "flight-id-missing",
+    ],
 )
 def test_malformed_list_trips_counts_as_byair_failure(state_root: Path, capsys, trips_payload):
     """#327 review: byAir answering in the wrong shape is a byAir failure,
-    so it advances byair_unreachable, not the internal run."""
+    so it advances byair_unreachable, not the internal run, and never reads
+    as "no flights" (which would untrack every active flight)."""
+    write_active_flights([100])
     payloads = [
         _main_payload(capsys, list_trips_return=trips_payload)
         for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD)
@@ -461,6 +481,7 @@ def test_malformed_list_trips_counts_as_byair_failure(state_root: Path, capsys, 
             "error": "malformed_response",
         }
     ]
+    assert read_active_flights() == [100]
 
 
 def _health_record(**overrides) -> dict:
@@ -548,3 +569,19 @@ def test_script_emits_safe_shape_when_byair_unset(tmp_path: Path):
     assert payload["wake_agent"] is False
     # Error context is in stderr; stdout stays a safe shape
     assert payload["data"].get("error") == "sync_exception"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [{"alerted": 1}, {"internal_alerted": "yes"}, {"last_error": 5}, {"last_internal_error": []}],
+    ids=["alerted-int", "internal-alerted-str", "last-error-int", "last-internal-error-list"],
+)
+def test_writer_rejects_values_its_reader_would_refuse(state_root: Path, override: dict):
+    """#327 review: the writer enforces the same field types the reader
+    validates, so it can never persist a record the next run rejects."""
+    from state import write_sync_health
+
+    record = {k: v for k, v in _health_record(**override).items() if k != "schema_version"}
+    with pytest.raises(ValueError):
+        write_sync_health(record)
+    assert not (state_root / "sync-health.json").exists()

@@ -602,8 +602,15 @@ def test_get_airport_not_found_raises(client):
         lambda: _FakeResponse(b"<html>oops</html>", {"content-type": "application/json"}),
         # A JSON body that is not an object.
         lambda: _FakeResponse(b"[]", {"content-type": "application/json"}),
+        # A text block with no string `text` field.
+        lambda: _FakeResponse(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text"}]}}
+            ).encode(),
+            {"content-type": "application/json"},
+        ),
     ],
-    ids=["text-not-json", "body-not-json", "body-not-object"],
+    ids=["text-not-json", "body-not-json", "body-not-object", "text-field-missing"],
 )
 def test_malformed_upstream_reply_is_a_byair_error(tool_response):
     """#327 review: a reply byAir sent in the wrong shape surfaces as
@@ -614,3 +621,32 @@ def test_malformed_upstream_reply_is_a_byair_error(tool_response):
         with pytest.raises(ByAirError) as exc_info:
             client.get_flight(flight_id=1)
     assert exc_info.value.error_type == "malformed_response"
+
+
+@pytest.mark.parametrize(
+    ("init_body", "error_type"),
+    [
+        (
+            {"jsonrpc": "2.0", "id": 1, "error": {"code": -32600, "message": "bad"}},
+            "handshake_failed",
+        ),
+        ({"jsonrpc": "2.0", "id": 1}, "malformed_response"),
+        ({"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {}}}, "malformed_response"),
+    ],
+    ids=["jsonrpc-error", "no-result", "no-protocol-version"],
+)
+def test_initialize_must_be_a_real_initialize_result(init_body, error_type):
+    """#327 review: an HTTP-200 initialize that is a JSON-RPC error or not an
+    InitializeResult is never mistaken for stateless mode; no tools/call follows."""
+    client = ByAirClient(SYNTH_URL)
+    methods: list = []
+
+    def fake_urlopen(request, **kwargs):
+        methods.append(json.loads(request.data).get("method"))
+        return _FakeResponse(json.dumps(init_body).encode(), {"content-type": "application/json"})
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with pytest.raises(ByAirError) as exc_info:
+            client.get_flight(flight_id=1)
+    assert exc_info.value.error_type == error_type
+    assert methods == ["initialize"]

@@ -264,25 +264,28 @@ def _run_sync(*, now_utc: datetime) -> dict:
 def _extract_flights(trips_payload: object) -> list[dict]:
     """Pull every flight dict out of the trips response into a flat list.
 
-    Raises `ByAirError("malformed_response")` when byAir's reply does not
-    have the documented `{"trips": [{"flights": [{...}]}]}` shape.
+    Raises `ByAirError("malformed_response")` unless byAir's reply has the
+    documented shape: an explicit `trips` list, each trip an object with an
+    explicit `flights` list, each flight an object with an int `id`. A
+    missing collection must never read as "no flights", which would make
+    reconciliation untrack every active flight.
     """
-    if not isinstance(trips_payload, dict) or not isinstance(
-        trips_payload.get("trips", []) or [], list
-    ):
+    trips = trips_payload.get("trips") if isinstance(trips_payload, dict) else None
+    if not isinstance(trips, list):
         raise ByAirError(
-            "malformed_response", f"list_trips returned {type(trips_payload).__name__}"
+            "malformed_response", "list_trips reply has no `trips` list — byAir changed its shape"
         )
     flights: list[dict] = []
-    for trip in trips_payload.get("trips", []) or []:
-        if not isinstance(trip, dict) or not isinstance(trip.get("flights", []) or [], list):
-            raise ByAirError("malformed_response", "list_trips trip entry is not an object")
-        for flight in trip.get("flights", []) or []:
-            if not isinstance(flight, dict):
-                raise ByAirError("malformed_response", "list_trips flight entry is not an object")
+    for trip in trips:
+        trip_flights = trip.get("flights") if isinstance(trip, dict) else None
+        if not isinstance(trip_flights, list):
+            raise ByAirError("malformed_response", "list_trips trip has no `flights` list")
+        for flight in trip_flights:
+            flight_id = flight.get("id") if isinstance(flight, dict) else None
+            if not isinstance(flight_id, int) or isinstance(flight_id, bool):
+                raise ByAirError("malformed_response", "list_trips flight has no integer `id`")
             # Carry the trip_id into the flight dict so the writer has it.
-            flight = {**flight, "_trip_id": trip.get("id")}
-            flights.append(flight)
+            flights.append({**flight, "_trip_id": trip.get("id")})
     return flights
 
 

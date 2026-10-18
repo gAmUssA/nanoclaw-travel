@@ -1005,7 +1005,13 @@ def write_sync_health(record: dict) -> None:
         count = record.get(count_key)
         if not isinstance(count, int) or isinstance(count, bool) or count < 0:
             raise ValueError(f"write_sync_health: {count_key} must be an int >= 0, got {count!r}")
+        alerted = record.get(alerted_key)
+        if not isinstance(alerted, bool):
+            raise ValueError(f"write_sync_health: {alerted_key} must be a bool, got {alerted!r}")
+        error = record.get(error_key)
+        if not isinstance(error, (str, type(None))):
+            raise ValueError(f"write_sync_health: {error_key} must be a str or None, got {error!r}")
         payload[count_key] = count
-        payload[alerted_key] = bool(record.get(alerted_key))
-        payload[error_key] = record.get(error_key)
+        payload[alerted_key] = alerted
+        payload[error_key] = error
     _atomic_write_json(state_dir() / SYNC_HEALTH_FILE, payload)

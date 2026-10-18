@@ -197,8 +197,22 @@ class ByAirClient:
             "MCP-Protocol-Version": _PROTOCOL_VERSION,
         }
         response, response_headers = self._http_post(headers, payload)
+        # Accept the handshake only on a real InitializeResult, session id or
+        # not: a JSON-RPC error or a malformed HTTP-200 body must not be
+        # mistaken for stateless mode (#326).
+        if isinstance(response, dict) and "error" in response:
+            raise ByAirError(
+                "handshake_failed",
+                f"initialize returned a JSON-RPC error: {response['error']!r} — check that "
+                "BYAIR_MCP_URL is the current personal MCP link from https://byairapp.com/mcp/",
+            )
+        result = response.get("result") if isinstance(response, dict) else None
+        if not isinstance(result, dict) or not isinstance(result.get("protocolVersion"), str):
+            raise ByAirError(
+                "malformed_response",
+                "initialize response is not an InitializeResult (no result.protocolVersion)",
+            )
         self._session_id = response_headers.get("mcp-session-id") or None
-        _ = response  # body parsed but not retained — server caps are not needed for the API path
 
         # Notify the server we're initialized (no response expected)
         notify_payload = self._rpc_envelope("notifications/initialized", None, notification=True)
@@ -232,6 +246,7 @@ class ByAirClient:
             or not content_list
             or not isinstance(content_list[0], dict)
             or content_list[0].get("type") != "text"
+            or not isinstance(content_list[0].get("text"), str)
         ):
             raise ByAirError(
                 "malformed_response",
@@ -239,7 +254,8 @@ class ByAirClient:
             )
         text_payload = content_list[0]["text"]
         if is_error:
-            error_type = result.get("_meta", {}).get("error_type", "unknown")
+            meta = result.get("_meta")
+            error_type = meta.get("error_type", "unknown") if isinstance(meta, dict) else "unknown"
             raise ByAirError(error_type, text_payload)
         try:
             return json.loads(text_payload)
