@@ -82,7 +82,9 @@ Fields:
 - `internal_alerted` (bool, required) — a `sync_internal_error` event went out for the current internal run
 - `last_internal_error` (str or null, required) — the exception class of the latest local fault
 
-Reader contract: `read_sync_health()` returns the zero record for a missing file. An unreadable or misshapen file, or a `schema_version` other than `1`, raises `StateError`. `sync_tripit.py` reports that as `health_error` in its payload and on stderr, and still emits the sync's diff. Version 1 has no predecessor to migrate; a bump adds its migration to `read_sync_health()`.
+Gate store: this artifact takes the gate-store exception of `coding-policy: stateful-artifacts` Migration Policy. `alerted` and `internal_alerted` gate a repeat alert for the current failure run, so reading an unaccepted record as "no usable prior state" would clear that gate and re-send the alert. The reader therefore refuses with an actionable `StateError` on any version it does not accept, and the owner migrates and rewrites every older version it accepts, on read (none exist for v1).
+
+Reader contract: `read_sync_health()` returns the zero record for a missing file. An unreadable or misshapen file, or a `schema_version` other than the plain integer `1`, raises `StateError`. `sync_tripit.py` reports that as `health_error` in its payload and on stderr, and still emits the sync's diff. Version 1 has no predecessor to migrate; a bump adds its migration to `read_sync_health()`.
 
 ### `current-location.json`
 

@@ -38,11 +38,13 @@ sys.path.insert(0, str(_BUNDLE_DIR))
 
 from byair_client import ByAirClient, ByAirError  # noqa: E402
 from state import (  # noqa: E402
+    SYNC_HEALTH_FILE,
     StateError,
     delete_flight_state,
     read_active_flights,
     read_flight_state,
     read_sync_health,
+    state_dir,
     write_active_flights,
     write_flight_state,
     write_sync_health,
@@ -72,16 +74,16 @@ _OUTAGE_ALERT_THRESHOLD = 3
 
 
 def main() -> int:
-    # outer-boundary-process-contract: same shape as precheck.py.
-    # The scheduled task reads non-zero exit OR invalid stdout as
-    # "skip waking the agent". A bare programming bug bubbling out
-    # would silently disable the wake contract for every subsequent
-    # run; catch it here, emit safe-shape JSON, return 0.
     try:
         diff = _run_sync(now_utc=datetime.now(timezone.utc))
         _attach_sync_health(diff, internal_error=None)
         _emit_diff(diff)
         return 0
+    # outer-boundary-process-contract: the scheduled task reads a non-zero
+    # exit OR invalid stdout as "skip waking the agent", silently. This
+    # handler emits the safe-shape `sync_exception` JSON (plus the internal
+    # failure count) and exits 0; letting the exception propagate would
+    # break that stdout contract and disable every later wake decision.
     except Exception as exc:  # noqa: BLE001 — outer-boundary-process-contract
         traceback.print_exc(file=sys.stderr)
         diff = {"added": [], "removed": [], "error": "sync_exception"}
@@ -153,7 +155,12 @@ def _attach_sync_health(diff: dict, *, internal_error: str | None) -> None:
             byair_error=byair_error, internal_error=internal_error
         )
     except (StateError, OSError, ValueError) as health_err:
-        print(f"flight-assist sync: health counter not updated: {health_err}", file=sys.stderr)
+        print(
+            f"flight-assist sync: health counter in {state_dir() / SYNC_HEALTH_FILE} not updated "
+            f"({health_err}) — check that file's permissions and the disk's free space; if it is "
+            "corrupt or from a newer flight-assist, remove it to restart the counts",
+            file=sys.stderr,
+        )
         diff["health_error"] = type(health_err).__name__
 
 
@@ -244,15 +251,35 @@ def _run_sync(*, now_utc: datetime) -> dict:
         )
         return {"added": [], "removed": [], "error": byair_err.error_type}
 
-    upstream_flights = _extract_flights(trips_payload)
+    try:
+        upstream_flights = _extract_flights(trips_payload)
+    except ByAirError as byair_err:
+        # A reply byAir sent in the wrong shape is a byAir failure, not a
+        # local fault: it counts toward byair_unreachable (#326).
+        print(f"flight-assist sync: byair error: {byair_err}", file=sys.stderr)
+        return {"added": [], "removed": [], "error": byair_err.error_type}
     return _reconcile_active_flights(upstream_flights, now_utc=now_utc)
 
 
-def _extract_flights(trips_payload: dict) -> list[dict]:
-    """Pull every flight dict out of the trips response into a flat list."""
+def _extract_flights(trips_payload: object) -> list[dict]:
+    """Pull every flight dict out of the trips response into a flat list.
+
+    Raises `ByAirError("malformed_response")` when byAir's reply does not
+    have the documented `{"trips": [{"flights": [{...}]}]}` shape.
+    """
+    if not isinstance(trips_payload, dict) or not isinstance(
+        trips_payload.get("trips", []) or [], list
+    ):
+        raise ByAirError(
+            "malformed_response", f"list_trips returned {type(trips_payload).__name__}"
+        )
     flights: list[dict] = []
     for trip in trips_payload.get("trips", []) or []:
+        if not isinstance(trip, dict) or not isinstance(trip.get("flights", []) or [], list):
+            raise ByAirError("malformed_response", "list_trips trip entry is not an object")
         for flight in trip.get("flights", []) or []:
+            if not isinstance(flight, dict):
+                raise ByAirError("malformed_response", "list_trips flight entry is not an object")
             # Carry the trip_id into the flight dict so the writer has it.
             flight = {**flight, "_trip_id": trip.get("id")}
             flights.append(flight)

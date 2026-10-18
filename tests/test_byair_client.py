@@ -591,3 +591,26 @@ def test_get_airport_not_found_raises(client):
         with pytest.raises(ByAirError) as exc_info:
             client.get_airport(airport_id=999999)
     assert exc_info.value.error_type == "not_found"
+
+
+@pytest.mark.parametrize(
+    "tool_response",
+    [
+        # Text content that is not JSON.
+        lambda: _tool_response("not json at all"),
+        # A response body that is not JSON.
+        lambda: _FakeResponse(b"<html>oops</html>", {"content-type": "application/json"}),
+        # A JSON body that is not an object.
+        lambda: _FakeResponse(b"[]", {"content-type": "application/json"}),
+    ],
+    ids=["text-not-json", "body-not-json", "body-not-object"],
+)
+def test_malformed_upstream_reply_is_a_byair_error(tool_response):
+    """#327 review: a reply byAir sent in the wrong shape surfaces as
+    ByAirError("malformed_response"), never a raw decode/attribute error."""
+    client = ByAirClient(SYNTH_URL)
+    recorder: list = []
+    with patch("urllib.request.urlopen", side_effect=_stateless_fake(recorder, tool_response)):
+        with pytest.raises(ByAirError) as exc_info:
+            client.get_flight(flight_id=1)
+    assert exc_info.value.error_type == "malformed_response"

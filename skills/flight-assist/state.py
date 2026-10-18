@@ -967,7 +967,12 @@ def read_sync_health() -> dict:
     if not isinstance(payload, dict):
         raise StateError(f"{path} is not a JSON object — remove it to restart the counts")
     version = payload.get("schema_version")
-    if version != SYNC_HEALTH_SCHEMA_VERSION:
+    # A plain int only: JSON `true` and `1.0` both compare equal to 1.
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version != SYNC_HEALTH_SCHEMA_VERSION
+    ):
         raise StateError(
             f"{path} has schema_version {version!r}; this owner reads "
             f"{SYNC_HEALTH_SCHEMA_VERSION} — upgrade flight-assist, or remove the file"

@@ -441,6 +441,28 @@ def test_local_fault_leaves_the_byair_run_untouched(state_root: Path, capsys):
     ]
 
 
+@pytest.mark.parametrize(
+    "trips_payload",
+    [[], {"trips": "nope"}, {"trips": [["not", "a", "trip"]]}, {"trips": [{"flights": [7]}]}],
+    ids=["list", "trips-not-list", "trip-not-object", "flight-not-object"],
+)
+def test_malformed_list_trips_counts_as_byair_failure(state_root: Path, capsys, trips_payload):
+    """#327 review: byAir answering in the wrong shape is a byAir failure,
+    so it advances byair_unreachable, not the internal run."""
+    payloads = [
+        _main_payload(capsys, list_trips_return=trips_payload)
+        for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD)
+    ]
+    assert payloads[-1]["data"]["error"] == "malformed_response"
+    assert _source_events(payloads[-1]) == [
+        {
+            "reason": "byair_unreachable",
+            "consecutive_failures": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+            "error": "malformed_response",
+        }
+    ]
+
+
 def _health_record(**overrides) -> dict:
     record = {
         "schema_version": 1,
@@ -464,10 +486,12 @@ del _MISSING_LAST_ERROR["last_error"]
     [
         "{not json",
         json.dumps(_health_record(schema_version=2)),
+        json.dumps(_health_record(schema_version=True)),
+        json.dumps(_health_record(schema_version=1.0)),
         # Valid types but no last_error key (Copilot on #327).
         json.dumps(_MISSING_LAST_ERROR),
     ],
-    ids=["unparseable", "newer-schema", "missing-last-error"],
+    ids=["unparseable", "newer-schema", "bool-schema", "float-schema", "missing-last-error"],
 )
 def test_unusable_health_file_is_reported_not_reset(state_root: Path, capsys, content: str):
     """An unusable record is never silently zeroed: the pass reports

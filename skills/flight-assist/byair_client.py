@@ -222,10 +222,17 @@ class ByAirClient:
             }
         )
         body, _ = self._http_post(headers, payload)
-        result = body.get("result", {})
+        result = body.get("result", {}) if isinstance(body, dict) else None
+        if not isinstance(result, dict):
+            raise ByAirError("malformed_response", f"{name} response has no result object")
         is_error = result.get("isError", False)
         content_list = result.get("content", [])
-        if not content_list or content_list[0].get("type") != "text":
+        if (
+            not isinstance(content_list, list)
+            or not content_list
+            or not isinstance(content_list[0], dict)
+            or content_list[0].get("type") != "text"
+        ):
             raise ByAirError(
                 "malformed_response",
                 f"{name} response had no text content block — got {result!r}",
@@ -234,7 +241,12 @@ class ByAirClient:
         if is_error:
             error_type = result.get("_meta", {}).get("error_type", "unknown")
             raise ByAirError(error_type, text_payload)
-        return json.loads(text_payload)
+        try:
+            return json.loads(text_payload)
+        except json.JSONDecodeError as decode_err:
+            raise ByAirError(
+                "malformed_response", f"{name} text content is not JSON: {decode_err}"
+            ) from decode_err
 
     def _http_post(
         self, headers: dict, payload: bytes, *, expect_response: bool = True
@@ -273,7 +285,12 @@ class ByAirClient:
                         f"SSE-parsing path added in `_http_post`.",
                     )
                 raw = response.read().decode("utf-8")
-                return (json.loads(raw), response_headers)
+                try:
+                    return (json.loads(raw), response_headers)
+                except json.JSONDecodeError as decode_err:
+                    raise ByAirError(
+                        "malformed_response", f"response body is not JSON: {decode_err}"
+                    ) from decode_err
         except urllib.error.HTTPError as http_err:
             # Session expired: 400 or 404 with a prior session-id sent.
             if http_err.code in (400, 404) and self._session_id is not None:
