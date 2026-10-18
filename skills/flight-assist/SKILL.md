@@ -89,7 +89,7 @@ The reason → notification mapping for the documented events:
 | `byair_unreachable` | "Flight sync with byAir is failing: `<consecutive_failures>` passes in a row, last error `<error>`. New or changed trips won't reach flight tracking until it recovers. Details are in the sync-tripit host log." Always send it |
 | `byair_recovered` | "Flight sync with byAir recovered." |
 | `sync_internal_error` | "Flight sync is failing inside NanoClaw: `<consecutive_failures>` passes in a row, last error `<error>`. The traceback is in the sync-tripit host log." Always send it |
-| `sync_internal_recovered` | "Flight sync recovered." |
+| `sync_internal_recovered` | "The local fault in flight sync has cleared." Claim nothing about byAir: a `byair_unreachable` in the same wake still stands |
 
 Source-level events carry `flight_id: null` and have no per-flight state. For each event with a non-null `flight_id`, fetch the per-flight state to enrich the notification (gate, terminal, ETD, ETA) by invoking `get-flight-state.py`:
 
@@ -100,6 +100,8 @@ python3 /home/node/.claude/skills/tessl__flight-assist/scripts/get-flight-state.
 Outputs the full state record as single-line JSON on stdout, or `{"error": "..."}` when the flight has no state on disk. Use the `last_snapshot.dep_gate`, `last_snapshot.arr_gate`, `dep_terminal`, etc. to fill in the notification template. When a template names an airport, render it from `last_snapshot.dep_airport_code`/`dep_airport_name` / `arr_airport_code`/`arr_airport_name` — the resolved airport captured at poll time. Never free-type an airport name from a numeric id or from memory of the trip.
 
 If multiple events share the same `flight_id` (e.g., `gate_change` + `delay` in one cycle), compose ONE notification per flight that merges them, ordered: cancel/divert first, then time-sensitive (boarding, time_to_leave), then info (gate, delay, inbound), then logistics (carousel, arrival).
+
+Source-level events (`flight_id: null`) are never merged: compose each one as its own notification, separate from flight events and from each other.
 
 After composing, route the notification through the user's main channel (the orchestrator handles routing; the skill just produces the message text).
 

@@ -213,7 +213,7 @@ Fires once per failure run, when consecutive passes that died on a local fault (
 {"reason": "sync_internal_recovered", "failures_before_recovery": 4}
 ```
 
-Fires on the first pass that produces a result after a `sync_internal_error` alert.
+Fires on the first pass that produces a result after a `sync_internal_error` alert. It means the local fault cleared, nothing more: that same pass may still fail at byAir and advance the separate byAir run.
 
 ## Composition Discipline
 

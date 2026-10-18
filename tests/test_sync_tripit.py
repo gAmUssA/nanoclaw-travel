@@ -484,6 +484,26 @@ def test_malformed_list_trips_counts_as_byair_failure(state_root: Path, capsys, 
     assert read_active_flights() == [100]
 
 
+def test_internal_recovery_then_byair_failure_reports_both_runs(state_root: Path, capsys):
+    """#327 review: clearing the local fault says nothing about byAir. A pass
+    that completes locally but fails at byAir emits sync_internal_recovered
+    and still advances the byAir run."""
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD):
+        _internal_failure_payload(capsys)
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    payload = _main_payload(capsys, list_trips_side_effect=failure)
+    assert payload["data"]["error"] == "session_missing"
+    assert _source_events(payload) == [
+        {
+            "reason": "sync_internal_recovered",
+            "failures_before_recovery": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+        }
+    ]
+    record = json.loads((state_root / "sync-health.json").read_text(encoding="utf-8"))
+    assert record["consecutive_failures"] == 1
+    assert record["internal_failures"] == 0
+
+
 def _health_record(**overrides) -> dict:
     record = {
         "schema_version": 1,
