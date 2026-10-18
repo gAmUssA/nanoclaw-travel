@@ -28,7 +28,7 @@ Available actions:
 This step fires when the wake carries a non-empty `data.events` list. Compose one notification per event with the flight-assist reason table:
 
 ```
-Skill(skill: "flight-assist")
+Skill(skill: "tessl__flight-assist")
 ```
 
 Use its Step 3 table and its composition rules. Source-level events carry `flight_id: null` and need no per-flight state. Finish here.

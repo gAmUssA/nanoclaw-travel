@@ -268,7 +268,11 @@ class ByAirClient:
             # A non-string error type (null included) is a malformed reply: a
             # None here would read as a clean pass in the sync-health counter.
             if not isinstance(error_type, str) or not error_type:
-                error_type = "malformed_response"
+                raise ByAirError(
+                    "malformed_response",
+                    f"{name} error reply has no string error_type: {text_payload}"
+                    + _MALFORMED_REMEDY,
+                )
             raise ByAirError(error_type, text_payload)
         try:
             return json.loads(text_payload)
@@ -314,10 +318,9 @@ class ByAirClient:
                         f"the server's streaming behaviour changed and the client needs an "
                         f"SSE-parsing path added in `_http_post`.",
                     )
-                raw = response.read().decode("utf-8")
                 try:
-                    return (json.loads(raw), response_headers)
-                except json.JSONDecodeError as decode_err:
+                    return (json.loads(response.read().decode("utf-8")), response_headers)
+                except (UnicodeDecodeError, json.JSONDecodeError) as decode_err:
                     raise ByAirError(
                         "malformed_response",
                         f"response body is not JSON: {decode_err}" + _MALFORMED_REMEDY,

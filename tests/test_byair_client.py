@@ -600,6 +600,8 @@ def test_get_airport_not_found_raises(client):
         lambda: _tool_response("not json at all"),
         # A response body that is not JSON.
         lambda: _FakeResponse(b"<html>oops</html>", {"content-type": "application/json"}),
+        # A response body that is not UTF-8.
+        lambda: _FakeResponse(b"\xff\xfe\x00garbage", {"content-type": "application/json"}),
         # A JSON body that is not an object.
         lambda: _FakeResponse(b"[]", {"content-type": "application/json"}),
         # A text block with no string `text` field.
@@ -610,7 +612,13 @@ def test_get_airport_not_found_raises(client):
             {"content-type": "application/json"},
         ),
     ],
-    ids=["text-not-json", "body-not-json", "body-not-object", "text-field-missing"],
+    ids=[
+        "text-not-json",
+        "body-not-json",
+        "body-not-utf8",
+        "body-not-object",
+        "text-field-missing",
+    ],
 )
 def test_malformed_upstream_reply_is_a_byair_error(tool_response):
     """#327 review: a reply byAir sent in the wrong shape surfaces as
@@ -674,6 +682,7 @@ def test_non_string_error_type_is_malformed(error_type):
         with pytest.raises(ByAirError) as exc_info:
             client.get_flight(flight_id=1)
     assert exc_info.value.error_type == "malformed_response"
+    assert "upgrade nanoclaw-travel" in exc_info.value.message
 
 
 def test_malformed_reply_message_names_the_remedy():
