@@ -2,7 +2,8 @@
 name: sync-tripit
 description: "Adaptive scheduler for the TripIt/byAir refresh of active-flights.json. Precheck-gated to keep byAir polling responsive on flight days and idle between travel windows. Use when active-flights.json isn't updating, byAir polling cadence isn't matching flight density, troubleshooting flight tracking / flight notifications / flight status updates / travel schedule refresh, or setting up flight-assist on a new install. The gate predicate and threshold constants live in precheck.py."
 cadence: "*/5 * * * *"
-agentModel: "claude-haiku-4-5-20251001"
+# agentModel renewal: no scanner tracks this pin. Re-check it on each new Claude model release and bump it in its own PR.
+agentModel: "claude-haiku-5-5"
 script: "precheck.py"
 precheck_timeout_ms: 90000
 user-invocable: false

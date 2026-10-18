@@ -1,5 +1,9 @@
 # Changelog
 
+### Move the four cadence skills to Haiku 5.5 (#324)
+
+`drive-engine`, `flight-assist`, `nightly-travel-sync` and `sync-tripit` now pin `agentModel: "claude-haiku-5-5"` (was `claude-haiku-4-5-20251001`). The orchestrator's agent image ships Agent SDK 0.3.293 with Claude Code 2.1.293, which knows the model and prices it (jbaruch/nanoclaw#990, verified on the NAS 2026-10-18). None of these skills calls Haiku directly with a thinking budget, which Haiku 5.5 rejects. Each pin now carries the renewal note the other fleet plugins use.
+
 ## 0.2.144 — 2026-09-23
 
 ### Trim skill descriptions that carry implementation detail (#965 sibling)
