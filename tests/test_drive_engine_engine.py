@@ -621,3 +621,20 @@ def test_airport_arrival_on_home_metro_placeholder_returns_home():
     arrival = next(c.desired for c in result.plan.creates if c.desired.kind == "airport_arrival")
     assert arrival.destination == HOME
     assert arrival.baseline_seconds == 2400
+
+
+def test_an_implausibly_long_airport_drive_writes_no_block():
+    """#323: a 16.8 h "drive" to a departure airport means the origin resolved
+    to the wrong city; it is reported, never written."""
+    result = build_reconcile_plan(
+        flights=_staged_round_trip_chain(),
+        airport_info=_us_info("BNA", "SFO"),
+        current_blocks=[],
+        route=const_route(16 * 60 + 49),
+        schedule=_staged_round_trip_schedule(),
+        home_address=HOME,
+        now=NOW,
+    )
+    kinds = {c.desired.kind for c in result.plan.creates}
+    assert "airport_departure" not in kinds and "airport_arrival" not in kinds
+    assert any("implausible 16.8 h drive" in reason for reason in result.skipped)

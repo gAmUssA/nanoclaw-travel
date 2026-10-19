@@ -71,7 +71,7 @@ if str(_BUNDLE_DIR) not in sys.path:
     sys.path.insert(0, str(_BUNDLE_DIR))
 
 from addresses import home_metro_names, is_home_metro  # noqa: E402
-from lodging import CHECK_IN, lodging_role  # noqa: E402
+from lodging import CHECK_IN, CHECK_OUT, hotel_name, lodging_role  # noqa: E402
 
 SCHEDULE_PATH = "/workspace/group/travel-schedule.json"
 
@@ -314,6 +314,62 @@ def _trip_begins_at(
     return min(candidates) if candidates else None
 
 
+# How long after a nominal check-in a transport departure still marks the
+# operator as en route to that lodging. TripIt's nominal check-in routinely
+# precedes the real arrival on a city-to-city hotel-change day (#323); a
+# flight days later is a mid-stay trip, not the inbound one.
+_INBOUND_WINDOW = timedelta(hours=12)
+
+
+def _effective_check_in(record: dict, nominal: datetime, schedule: list[dict]) -> datetime:
+    """When the operator can actually be at a checked-in lodging.
+
+    Only on a hotel change: when the operator was at another lodging earlier
+    in the trip, a transport that departs after the nominal check-in, before
+    that lodging's check-out and within _INBOUND_WINDOW is the one bringing
+    them there, so the check-in takes effect at its arrival. A first lodging
+    reached from home (an airport hotel the night before a flight, #235) and
+    the morning flight after an airport-hotel night (check-out bound) keep
+    their nominal check-in.
+    """
+    name = hotel_name(record.get("summary"))
+    came_from_lodging = any(
+        other.get("type") == "Lodging"
+        and hotel_name(other.get("summary")) not in (None, name)
+        and (when := _timed_within(other, None, None)) is not None
+        and when < nominal
+        for other in schedule
+    )
+    if not came_from_lodging:
+        return nominal
+    checkout = None
+    for other in schedule:
+        if other.get("type") != "Lodging" or lodging_role(other.get("summary")) != CHECK_OUT:
+            continue
+        if hotel_name(other.get("summary")) != name:
+            continue
+        when = parse_schedule_time(other.get("start"))
+        if when is not None and when > nominal and (checkout is None or when < checkout):
+            checkout = when
+    limit = nominal + _INBOUND_WINDOW
+    if checkout is not None and checkout < limit:
+        limit = checkout
+    inbound = None
+    inbound_departure = None
+    for transport in schedule:
+        if transport.get("type") not in _DEPARTURE_TYPES:
+            continue
+        departs = _timed_within(transport, None, None)
+        if departs is None or not (nominal < departs < limit):
+            continue
+        if inbound_departure is None or departs < inbound_departure:
+            inbound, inbound_departure = transport, departs
+    if inbound is None:
+        return nominal
+    arrives = parse_schedule_time(inbound.get("end"))
+    return arrives if arrives is not None and arrives > nominal else nominal
+
+
 def resolve_anchor(
     schedule: list[dict] | None,
     *,
@@ -395,6 +451,8 @@ def resolve_anchor(
         if not isinstance(location, str) or not location.strip():
             continue
         when = parse_schedule_time(record.get("start"))
+        if when is not None and lodging_role(record.get("summary")) == CHECK_IN:
+            when = _effective_check_in(record, when, schedule)
         if when is None or when > at_utc:
             continue
         # Bound lodging to the active trip's span so a prior trip's

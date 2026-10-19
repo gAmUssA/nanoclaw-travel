@@ -1,5 +1,9 @@
 # Changelog
 
+### drive-engine — a hotel-change day no longer drives from the next city's hotel (#323)
+
+The live `Drive: → FCO` block ran 16 h 49 min from the Schiphol airport Hilton to Rome Fiumicino, for KL1608 FCO→AMS. `resolve_anchor`'s lodging ladder took the latest lodging whose nominal check-in preceded the anchor, and TripIt's nominal Hilton check-in (13:00Z) came before the flight that gets the operator there (departs 17:45Z, lands 20:05Z). On a hotel change, a check-in now takes effect only when the operator can be there: a Flight or Rail departing after the nominal check-in, before that lodging's check-out and within 12 hours, defers it to that transport's arrival. A first lodging reached from home, like the airport hotel the night before a flight (#235), keeps its nominal check-in, as does the night before a morning flight that follows its check-out. Separately, an airport drive longer than 6 hours is never written as a block: the engine reports it as implausible with the origin and destination instead.
+
 ## 0.2.150 — 2026-10-19
 
 ### flight-assist — byAir session-less mode; sustained sync failures alert (#326)
