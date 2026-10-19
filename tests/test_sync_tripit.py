@@ -21,6 +21,7 @@ import sync_tripit  # noqa: E402
 from state import (  # noqa: E402
     read_active_flights,
     read_flight_state,
+    read_sync_health,
     write_active_flights,
     write_flight_state,
 )
@@ -366,6 +367,26 @@ def test_outage_alert_fires_once_at_threshold(state_root: Path, capsys):
     assert _source_events(payloads[-1]) == []
 
 
+def test_an_alert_that_never_reached_stdout_is_sent_again(state_root: Path, capsys):
+    """#327 review: `alerted` means the alert went out. A pass whose emission
+    fails must leave the health record untouched, so the next pass re-sends."""
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD - 1):
+        _main_payload(capsys, list_trips_side_effect=failure)
+    before = read_sync_health()
+    with (
+        patch("sync_tripit.ByAirClient.from_env") as mock_byair,
+        patch("sync_tripit._emit_diff", side_effect=BrokenPipeError("stdout closed")),
+    ):
+        mock_byair.return_value.list_trips.side_effect = failure
+        with pytest.raises(BrokenPipeError):
+            sync_tripit.main()
+    capsys.readouterr()
+    assert read_sync_health() == before
+    again = _main_payload(capsys, list_trips_side_effect=failure)
+    assert [e["reason"] for e in _source_events(again)] == ["byair_unreachable"]
+
+
 def test_recovery_after_alert_emits_recovered_and_resets(state_root: Path, capsys):
     failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
     for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD):
@@ -406,7 +427,7 @@ def test_unexpected_health_defect_still_emits_safe_shape(state_root: Path, capsy
     invalid stdout as a silent skip."""
     with (
         patch("sync_tripit.ByAirClient.from_env", side_effect=ValueError("unset")),
-        patch("sync_tripit._record_sync_health", side_effect=KeyError("count")),
+        patch("sync_tripit._plan_sync_health", side_effect=KeyError("count")),
     ):
         assert sync_tripit.main() == 0
     payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
@@ -569,11 +590,21 @@ def test_health_write_failure_keeps_the_sync_diff(state_root: Path, capsys):
     state_root.mkdir(parents=True)
     # A prior failure makes the clean pass below try to reset the counter.
     (state_root / "sync-health.json").write_text(json.dumps(_health_record()), encoding="utf-8")
-    with patch("sync_tripit.write_sync_health", side_effect=OSError("disk full")):
-        payload = _main_payload(capsys, list_trips_return=_trips_payload([_flight(100)]))
+    with (
+        patch("sync_tripit.write_sync_health", side_effect=OSError("disk full")),
+        patch("sync_tripit.ByAirClient.from_env") as mock_byair,
+    ):
+        mock_byair.return_value.list_trips.return_value = _trips_payload([_flight(100)])
+        assert sync_tripit.main() == 0
+    out, err = capsys.readouterr()
+    payload = json.loads(out.strip().splitlines()[-1])
     assert payload["wake_agent"] is True
     assert [e["event"]["reason"] for e in payload["data"]["events"]] == ["tracked_flight_added"]
-    assert payload["data"]["health_error"] == "OSError"
+    # The write runs after emission, so its failure goes to stderr; the
+    # unchanged record makes the next pass derive the same events.
+    assert "not updated (disk full)" in err
+    on_disk = json.loads((state_root / "sync-health.json").read_text(encoding="utf-8"))
+    assert on_disk == _health_record()
     assert read_active_flights() == [100]
 
 

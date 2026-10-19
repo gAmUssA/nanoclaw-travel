@@ -77,6 +77,7 @@ Fields:
 - `schema_version` (int, required) — `SYNC_HEALTH_SCHEMA_VERSION`, currently `1`
 - `consecutive_failures` (int ≥ 0, required) — passes that reached byAir and failed since the last clean one
 - `alerted` (bool, required) — a `byair_unreachable` event went out for the current byAir run
+- The writer persists a pass's transition only after the payload carrying its events is on stdout; a pass that never emitted leaves the record as it was, and a failed write repeats the events next pass (at-least-once)
 - `last_error` (str or null, required) — the latest byAir error type
 - `internal_failures` (int ≥ 0, required) — passes that died on a local fault before producing a result
 - `internal_alerted` (bool, required) — a `sync_internal_error` event went out for the current internal run

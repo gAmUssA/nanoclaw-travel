@@ -78,6 +78,7 @@ def main() -> int:
         diff = _run_sync(now_utc=datetime.now(timezone.utc))
         _attach_sync_health(diff, internal_error=None)
         _emit_diff(diff)
+        _commit_sync_health(diff)
         return 0
     # outer-boundary-process-contract: the scheduled task reads a non-zero
     # exit OR invalid stdout as "skip waking the agent", silently. This
@@ -100,6 +101,7 @@ def main() -> int:
             traceback.print_exc(file=sys.stderr)
             diff["health_error"] = type(health_exc).__name__
         _emit_diff(diff)
+        _commit_sync_health(diff)
         return 0
 
 
@@ -146,32 +148,61 @@ def _emit_diff(diff: dict) -> None:
         payload["data"]["error"] = diff["error"]
     if "health_error" in diff:
         payload["data"]["health_error"] = diff["health_error"]
-    print(json.dumps(payload, separators=(",", ":")))
+    # Flushed here so a closed stdout fails before `_commit_sync_health`
+    # records the events as sent.
+    print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+_HEALTH_REMEDY = (
+    "check that file's permissions and the disk's free space; if it is from a newer "
+    "flight-assist, upgrade nanoclaw-travel (never delete it: it holds the alert gate); "
+    "only a corrupt file may be removed to restart the counts"
+)
 
 
 def _attach_sync_health(diff: dict, *, internal_error: str | None) -> None:
-    """Record this pass in the sync-health counters; attach resulting events.
+    """Plan this pass's sync-health transition; attach the resulting events.
 
     The counters are bookkeeping beside the sync, never a gate on it: by now
     the active-flights index may already hold this pass's changes, so a
-    failed health read or write must not cost the diff its added/removed
-    events. The failure is reported on stderr and as `health_error` in the
-    payload instead.
+    failed health read must not cost the diff its added/removed events. The
+    failure is reported on stderr and as `health_error` in the payload
+    instead. The new record waits in the diff for `_commit_sync_health`,
+    which runs only after the events are on stdout.
     """
     byair_error = None if internal_error is not None else diff.get("error")
     try:
-        diff["source_events"] = _record_sync_health(
+        diff["source_events"], diff["_health_record"] = _plan_sync_health(
             byair_error=byair_error, internal_error=internal_error
         )
     except (StateError, OSError, ValueError) as health_err:
         print(
-            f"flight-assist sync: health counter in {state_dir() / SYNC_HEALTH_FILE} not updated "
-            f"({health_err}) — check that file's permissions and the disk's free space; if it is "
-            "from a newer flight-assist, upgrade nanoclaw-travel (never delete it: it holds the "
-            "alert gate); only a corrupt file may be removed to restart the counts",
+            f"flight-assist sync: health counter in {state_dir() / SYNC_HEALTH_FILE} not read "
+            f"({health_err}) — {_HEALTH_REMEDY}",
             file=sys.stderr,
         )
         diff["health_error"] = type(health_err).__name__
+
+
+def _commit_sync_health(diff: dict) -> None:
+    """Persist the planned record once its events have been emitted.
+
+    `alerted` means the alert went out, so a pass that never emitted leaves
+    the gate as it was and the next pass re-derives the same events. A
+    failed write after emission repeats them next pass instead: the alerts
+    are at-least-once, never lost.
+    """
+    record = diff.get("_health_record")
+    if record is None:
+        return
+    try:
+        write_sync_health(record)
+    except (StateError, OSError, ValueError) as health_err:
+        print(
+            f"flight-assist sync: health counter in {state_dir() / SYNC_HEALTH_FILE} not updated "
+            f"({health_err}); this pass's source events will repeat — {_HEALTH_REMEDY}",
+            file=sys.stderr,
+        )
 
 
 def _advance(
@@ -205,8 +236,13 @@ def _advance(
     return events
 
 
-def _record_sync_health(*, byair_error: str | None, internal_error: str | None) -> list[dict]:
-    """Update both failure runs for this pass; return source-level events.
+def _plan_sync_health(
+    *, byair_error: str | None, internal_error: str | None
+) -> tuple[list[dict], dict | None]:
+    """Advance both failure runs for this pass, without writing.
+
+    Returns the source-level events and the record to persist once they are
+    emitted, or None when the record is unchanged.
 
     A pass that died on a local fault advances the internal run and leaves
     the byAir run untouched (byAir was never asked). A pass that produced a
@@ -229,9 +265,7 @@ def _record_sync_health(*, byair_error: str | None, internal_error: str | None) 
             byair_error,
             ("byair_unreachable", "byair_recovered"),
         )
-    if record != health:
-        write_sync_health(record)
-    return events
+    return events, (record if record != health else None)
 
 
 def _run_sync(*, now_utc: datetime) -> dict:
