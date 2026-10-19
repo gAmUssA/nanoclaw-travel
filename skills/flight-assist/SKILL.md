@@ -106,4 +106,4 @@ Source-level events (`flight_id: null`) are never merged: compose each one as it
 
 After composing, route the notification through the user's main channel (the orchestrator handles routing; the skill just produces the message text).
 
-If no actionable text would result for an event (e.g., a duplicate notification you've already sent within the last 10 min), proceed silently — do not echo "no notification needed". Finish here.
+If no actionable text would result for an event (e.g., a duplicate notification you've already sent within the last 10 min), emit nothing for it: no `send_message`, no emoji, no reaction, no "no notification needed". A scheduled wake has no inbound message to react to. Never send an emoji ack from it. Finish here.
