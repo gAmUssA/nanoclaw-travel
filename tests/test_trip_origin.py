@@ -997,3 +997,302 @@ def test_effective_home_reads_profile_metro_for_local_placeholder(tmp_path, monk
     monkeypatch.setattr(trip_origin, "SCHEDULE_PATH", str(schedule))
 
     assert resolve_effective_home(HOME, now=_at("2025-07-07T18:00:00Z")) == HOME
+
+
+# --- #323: a nominal check-in before the inbound flight --------------------
+
+
+def _rome_to_amsterdam_schedule() -> list[dict]:
+    """The live 'Fall Break + BaselOne' shape: Rome hotel until KL1608 flies
+    FCO→AMS, but the Schiphol hotel's nominal check-in comes first."""
+    return [
+        {"type": "Trip", "summary": "Fall Break", "start": "2025-10-14", "end": "2025-10-20"},
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Dharma Boutique Hotel",
+            "start": "2025-10-15T12:00:00Z",
+            "location": "Via de' Ciancaleoni 49, Rome",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-out: Dharma Boutique Hotel",
+            "start": "2025-10-16T09:00:00Z",
+            "location": "Via de' Ciancaleoni 49, Rome",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Hilton Amsterdam Airport Schiphol",
+            "start": "2025-10-16T13:00:00Z",
+            "location": "Schiphol Boulevard 701, Schiphol",
+        },
+        {
+            "type": "Flight",
+            "summary": "KL1608 FCO to AMS",
+            "start": "2025-10-16T17:45:00Z",
+            "end": "2025-10-16T20:05:00Z",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-out: Hilton Amsterdam Airport Schiphol",
+            "start": "2025-10-17T08:00:00Z",
+            "location": "Schiphol Boulevard 701, Schiphol",
+        },
+    ]
+
+
+def test_the_airport_departure_origin_is_the_city_the_operator_is_still_in():
+    """#323: the anchor before KL1608 is the Rome hotel, not the Schiphol one he
+    only reaches on that flight."""
+    anchor = resolve_anchor(
+        _rome_to_amsterdam_schedule(),
+        at=datetime.fromisoformat("2025-10-16T16:45:00+00:00"),
+        home_address="home",
+    )
+    assert anchor.address == "Via de' Ciancaleoni 49, Rome"
+
+
+def test_the_new_lodging_takes_over_once_the_inbound_flight_lands():
+    anchor = resolve_anchor(
+        _rome_to_amsterdam_schedule(),
+        at=datetime.fromisoformat("2025-10-16T21:00:00+00:00"),
+        home_address="home",
+    )
+    assert anchor.address == "Schiphol Boulevard 701, Schiphol"
+
+
+def test_a_mid_stay_flight_days_later_does_not_move_the_check_in():
+    schedule = _rome_to_amsterdam_schedule()
+    schedule[4] = {
+        "type": "Flight",
+        "summary": "Day trip",
+        "start": "2025-10-18T07:00:00Z",
+        "end": "2025-10-18T09:00:00Z",
+    }
+    schedule[5] = {**schedule[5], "start": "2025-10-19T08:00:00Z"}
+    anchor = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T16:45:00+00:00"), home_address="home"
+    )
+    assert anchor.address == "Schiphol Boulevard 701, Schiphol"
+
+
+def test_a_previous_trips_hotel_is_not_a_hotel_change():
+    """#331 review: the first lodging of a trip reached from home keeps its
+    nominal check-in even when an earlier trip's hotel is still in the feed."""
+    schedule = [
+        {"type": "Trip", "summary": "Earlier", "start": "2026-09-01", "end": "2026-09-03"},
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Old Hotel",
+            "start": "2026-09-01T15:00:00Z",
+            "location": "1 Old St, Elsewhere",
+        },
+        {"type": "Trip", "summary": "Now", "start": "2026-10-10", "end": "2026-10-12"},
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Airport Hotel",
+            "start": "2026-10-10T22:00:00Z",
+            "location": "Airport Hotel, Nashville",
+        },
+        {
+            "type": "Flight",
+            "summary": "BNA to SFO",
+            "start": "2026-10-11T07:00:00Z",
+            "end": "2026-10-11T12:00:00Z",
+        },
+    ]
+    anchor = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2026-10-11T05:00:00+00:00"), home_address="home"
+    )
+    assert anchor.address == "Airport Hotel, Nashville"
+
+
+def _with_transports(*transports: dict) -> list[dict]:
+    schedule = [record for record in _rome_to_amsterdam_schedule() if record["type"] != "Flight"]
+    return schedule + list(transports)
+
+
+@pytest.mark.parametrize(
+    "legs",
+    [
+        pytest.param(
+            (
+                {
+                    "type": "Rail",
+                    "summary": "Roma Termini to Fiumicino Aeroporto",
+                    "start": "2025-10-16T15:00:00Z",
+                    "end": "2025-10-16T15:45:00Z",
+                },
+                {
+                    "type": "Flight",
+                    "summary": "KL1608 FCO to AMS",
+                    "start": "2025-10-16T17:45:00Z",
+                    "end": "2025-10-16T20:05:00Z",
+                },
+            ),
+            id="rail-then-flight",
+        ),
+        pytest.param(
+            (
+                {
+                    "type": "Flight",
+                    "summary": "AF1005 FCO to CDG",
+                    "start": "2025-10-16T14:00:00Z",
+                    "end": "2025-10-16T16:10:00Z",
+                },
+                {
+                    "type": "Flight",
+                    "summary": "AF1340 CDG to AMS",
+                    "start": "2025-10-16T18:45:00Z",
+                    "end": "2025-10-16T20:05:00Z",
+                },
+            ),
+            id="connecting-flights",
+        ),
+    ],
+)
+def test_the_new_lodging_waits_for_the_journeys_final_arrival(legs):
+    """#331 review: between legs the operator has not reached the new city, so
+    the previous lodging stays the anchor until the last leg lands."""
+    schedule = _with_transports(*legs)
+
+    between_legs = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T17:00:00+00:00"), home_address="home"
+    )
+    landed = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T21:00:00+00:00"), home_address="home"
+    )
+
+    assert between_legs.address == "Via de' Ciancaleoni 49, Rome"
+    assert landed.address == "Schiphol Boulevard 701, Schiphol"
+
+
+def test_a_staging_night_before_an_outbound_flight_keeps_its_check_in():
+    """#331 review: after another lodging, an airport-hotel night followed by a
+    morning flight out is outbound from that hotel, not the journey into it."""
+    schedule = [
+        {"type": "Trip", "summary": "Swing", "start": "2025-10-14", "end": "2025-10-20"},
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Dharma Boutique Hotel",
+            "start": "2025-10-14T12:00:00Z",
+            "location": "Via de' Ciancaleoni 49, Rome",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-out: Dharma Boutique Hotel",
+            "start": "2025-10-15T09:00:00Z",
+            "location": "Via de' Ciancaleoni 49, Rome",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Hilton Rome Airport",
+            "start": "2025-10-15T22:00:00Z",
+            "location": "Via Arturo Ferrarin 2, Fiumicino",
+        },
+        {
+            "type": "Flight",
+            "summary": "AZ608 FCO to JFK",
+            "start": "2025-10-16T07:00:00Z",
+            "end": "2025-10-16T09:00:00Z",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-out: Hilton Rome Airport",
+            "start": "2025-10-16T11:00:00Z",
+            "location": "Via Arturo Ferrarin 2, Fiumicino",
+        },
+    ]
+
+    anchor = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T05:00:00+00:00"), home_address="home"
+    )
+
+    assert anchor.address == "Via Arturo Ferrarin 2, Fiumicino"
+
+
+def test_a_next_morning_departure_does_not_extend_the_inbound_journey():
+    schedule = _rome_to_amsterdam_schedule() + [
+        {
+            "type": "Flight",
+            "summary": "KL1981 AMS to BSL",
+            "start": "2025-10-17T06:00:00Z",
+            "end": "2025-10-17T07:20:00Z",
+        }
+    ]
+
+    anchor = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T21:00:00+00:00"), home_address="home"
+    )
+
+    assert anchor.address == "Schiphol Boulevard 701, Schiphol"
+
+
+def test_a_leg_spanning_the_nominal_check_in_still_defers_it():
+    """#331 review: departing Rome before the 13:00Z nominal check-in and landing
+    after it leaves the operator in transit at check-in time."""
+    schedule = _with_transports(
+        {
+            "type": "Flight",
+            "summary": "KL1606 FCO to AMS",
+            "start": "2025-10-16T12:00:00Z",
+            "end": "2025-10-16T15:00:00Z",
+        }
+    )
+
+    in_transit = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T14:00:00+00:00"), home_address="home"
+    )
+    landed = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T16:00:00+00:00"), home_address="home"
+    )
+
+    assert in_transit.address == "Via de' Ciancaleoni 49, Rome"
+    assert landed.address == "Schiphol Boulevard 701, Schiphol"
+
+
+def test_a_flight_leaving_before_the_previous_checkout_is_still_inbound():
+    """#331 review: departing 09:00 against an 11:00 nominal check-out and landing
+    at 17:00 after a 15:00 nominal check-in keeps the operator in transit."""
+    schedule = [
+        {"type": "Trip", "summary": "Fall Break", "start": "2025-10-14", "end": "2025-10-20"},
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Dharma Boutique Hotel",
+            "start": "2025-10-15T12:00:00Z",
+            "location": "Via de' Ciancaleoni 49, Rome",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-out: Dharma Boutique Hotel",
+            "start": "2025-10-16T11:00:00Z",
+            "location": "Via de' Ciancaleoni 49, Rome",
+        },
+        {
+            "type": "Flight",
+            "summary": "AZ110 FCO to AMS via LHR",
+            "start": "2025-10-16T09:00:00Z",
+            "end": "2025-10-16T17:00:00Z",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Hilton Amsterdam Airport Schiphol",
+            "start": "2025-10-16T15:00:00Z",
+            "location": "Schiphol Boulevard 701, Schiphol",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-out: Hilton Amsterdam Airport Schiphol",
+            "start": "2025-10-17T08:00:00Z",
+            "location": "Schiphol Boulevard 701, Schiphol",
+        },
+    ]
+
+    airborne = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T16:00:00+00:00"), home_address="home"
+    )
+    landed = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T18:00:00+00:00"), home_address="home"
+    )
+
+    assert airborne.address == "Via de' Ciancaleoni 49, Rome"
+    assert landed.address == "Schiphol Boulevard 701, Schiphol"

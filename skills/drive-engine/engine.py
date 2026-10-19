@@ -46,6 +46,11 @@ from reconcile import (
 )
 from suppression import is_trivial_leg
 
+# No real drive to or from an airport runs this long; a longer one means the
+# origin or destination resolved to the wrong city (a 16.8 h Schiphol→FCO
+# "drive", #323). Such a leg writes no block and reports why.
+MAX_AIRPORT_DRIVE = timedelta(hours=6)
+
 RouteFn = Callable[[str, str], "timedelta | None"]
 BoardingPresentFn = Callable[[MergedFlight], bool]
 LeftTerminalFn = Callable[[MergedFlight, MergedFlight], bool]
@@ -125,6 +130,14 @@ def _legacy_keys(leg: ConcreteLeg) -> frozenset[tuple[str, str, str]]:
     return legacy_keys_for_airport_leg(kind, leg.flight.byair_flight_ids)
 
 
+def _implausible(side: str, leg: ConcreteLeg, drive: timedelta, origin: str, dest: str) -> str:
+    hours = drive.total_seconds() / 3600
+    return (
+        f"{side} {leg_identity(leg)}: implausible {hours:.1f} h drive {origin} → {dest}, "
+        "not written — check the trip's lodging and transport times in TripIt"
+    )
+
+
 def _build_departure(
     leg: ConcreteLeg,
     *,
@@ -153,6 +166,8 @@ def _build_departure(
     drive = route(origin, dest)
     if drive is None:
         return None, f"departure {leg_identity(leg)}: route failed"
+    if drive > MAX_AIRPORT_DRIVE:
+        return None, _implausible("departure", leg, drive, origin, dest)
     if is_trivial_leg(drive, presence_block_present=boarding_present(leg.flight)):
         return (
             None,
@@ -202,6 +217,8 @@ def _build_arrival(
     drive = route(origin, destination)
     if drive is None:
         return None, f"arrival {leg_identity(leg)}: route failed"
+    if drive > MAX_AIRPORT_DRIVE:
+        return None, _implausible("arrival", leg, drive, origin, destination)
     if is_trivial_leg(drive, presence_block_present=boarding_present(leg.flight)):
         return None, f"arrival {leg_identity(leg)}: trivial, suppressed"
     return (
@@ -230,6 +247,8 @@ def _build_transfer(leg: ConcreteLeg, *, route: RouteFn) -> tuple[DesiredBlock |
     drive = route(origin, dest)
     if drive is None:
         return None, f"transfer {leg_identity(leg)}: route failed"
+    if drive > MAX_AIRPORT_DRIVE:
+        return None, _implausible("transfer", leg, drive, origin, dest)
     leave_by = leg.window_end - drive
     return (
         DesiredBlock(

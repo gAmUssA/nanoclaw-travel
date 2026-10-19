@@ -71,7 +71,7 @@ if str(_BUNDLE_DIR) not in sys.path:
     sys.path.insert(0, str(_BUNDLE_DIR))
 
 from addresses import home_metro_names, is_home_metro  # noqa: E402
-from lodging import CHECK_IN, lodging_role  # noqa: E402
+from lodging import CHECK_IN, CHECK_OUT, hotel_name, lodging_role  # noqa: E402
 
 SCHEDULE_PATH = "/workspace/group/travel-schedule.json"
 
@@ -314,6 +314,86 @@ def _trip_begins_at(
     return min(candidates) if candidates else None
 
 
+# How far from checking out of another lodging, before or after its nominal
+# check-out, a departure still counts as the journey to the next one. TripIt's
+# nominal check-in routinely precedes the real arrival on a city-to-city
+# hotel-change day (#323); a departure after a night at the new lodging is
+# outbound from it, not inbound.
+_INBOUND_WINDOW = timedelta(hours=12)
+
+# Longest gap between one leg's arrival and the next leg's departure that still
+# continues the same journey (a train to the airport, a connecting flight).
+_CONNECTION_WINDOW = timedelta(hours=4)
+
+
+def _effective_check_in(
+    record: dict,
+    nominal: datetime,
+    schedule: list[dict],
+    trip_start: date | None,
+    trip_end: date | None,
+) -> datetime:
+    """When the operator can actually be at a checked-in lodging.
+
+    Only on a hotel change: the journey's first leg arrives after the nominal
+    check-in, departs before this lodging's check-out and within
+    _INBOUND_WINDOW of another lodging's nominal check-out, on either side.
+    Legs departing within _CONNECTION_WINDOW of the previous arrival continue
+    the journey, and the check-in takes effect at its final arrival. A first
+    lodging reached from home (#235) and a staging night before an outbound
+    departure keep their nominal check-in.
+    Lodgings and transports count only inside the active trip's span, so an
+    earlier trip's hotel is not a hotel change.
+    """
+    name = hotel_name(record.get("summary"))
+    checkout = None
+    left_lodging: list[datetime] = []
+    for other in schedule:
+        if other.get("type") != "Lodging" or lodging_role(other.get("summary")) != CHECK_OUT:
+            continue
+        other_name = hotel_name(other.get("summary"))
+        if other_name == name:
+            when = parse_schedule_time(other.get("start"))
+            if when is not None and when > nominal and (checkout is None or when < checkout):
+                checkout = when
+        elif other_name is not None:
+            when = _timed_within(other, trip_start, trip_end)
+            if when is not None:
+                left_lodging.append(when)
+    if not left_lodging:
+        return nominal
+    legs = []
+    for transport in schedule:
+        if transport.get("type") not in _DEPARTURE_TYPES:
+            continue
+        departs = _timed_within(transport, trip_start, trip_end)
+        arrives = parse_schedule_time(transport.get("end"))
+        if departs is None or arrives is None or arrives <= departs:
+            continue
+        if checkout is not None and departs >= checkout:
+            continue
+        legs.append((departs, arrives))
+    legs.sort()
+    first = next(
+        (
+            index
+            for index, (departs, arrives) in enumerate(legs)
+            if arrives > nominal
+            and any(abs(departs - left) <= _INBOUND_WINDOW for left in left_lodging)
+        ),
+        None,
+    )
+    if first is None:
+        return nominal
+    arrival = legs[first][1]
+    for departs, arrives in legs[first + 1 :]:
+        if departs > arrival + _CONNECTION_WINDOW:
+            break
+        if departs >= arrival:
+            arrival = arrives
+    return arrival if arrival > nominal else nominal
+
+
 def resolve_anchor(
     schedule: list[dict] | None,
     *,
@@ -395,6 +475,8 @@ def resolve_anchor(
         if not isinstance(location, str) or not location.strip():
             continue
         when = parse_schedule_time(record.get("start"))
+        if when is not None and lodging_role(record.get("summary")) == CHECK_IN:
+            when = _effective_check_in(record, when, schedule, trip_start, trip_end)
         if when is None or when > at_utc:
             continue
         # Bound lodging to the active trip's span so a prior trip's
