@@ -56,6 +56,37 @@ Fields:
 - `schema_version` (int, required) — currently `7`
 - `flight_ids` (list of int, required) — every flight the precheck should poll
 
+### `sync-health.json` — sync failure counters (#326)
+
+Two independent runs of consecutive failed sync passes, written only by `skills/flight-assist/sync_tripit.py`. It versions independently of the per-flight files.
+
+```json
+{
+  "schema_version": 1,
+  "consecutive_failures": 0,
+  "alerted": false,
+  "last_error": null,
+  "internal_failures": 0,
+  "internal_alerted": false,
+  "last_internal_error": null
+}
+```
+
+Fields:
+
+- `schema_version` (int, required) — `SYNC_HEALTH_SCHEMA_VERSION`, currently `1`
+- `consecutive_failures` (int ≥ 0, required) — passes that reached byAir and failed since the last clean one
+- `alerted` (bool, required) — a `byair_unreachable` event went out for the current byAir run
+- The writer persists a pass's transition only after the payload carrying its events is on stdout; a pass that never emitted leaves the record as it was, and a failed write repeats the events next pass (at-least-once)
+- `last_error` (str or null, required) — the latest byAir error type
+- `internal_failures` (int ≥ 0, required) — passes that died on a local fault before producing a result
+- `internal_alerted` (bool, required) — a `sync_internal_error` event went out for the current internal run
+- `last_internal_error` (str or null, required) — the exception class of the latest local fault
+
+Gate store: this artifact takes the gate-store exception of `coding-policy: stateful-artifacts` Migration Policy. `alerted` and `internal_alerted` gate a repeat alert for the current failure run, so reading an unaccepted record as "no usable prior state" would clear that gate and re-send the alert. The reader therefore refuses with an actionable `StateError` on any version it does not accept, and the owner migrates and rewrites every older version it accepts, on read (none exist for v1).
+
+Reader contract: `read_sync_health()` returns the zero record for a missing file. An unreadable or misshapen file, or a `schema_version` other than the plain integer `1`, raises `StateError`. `skills/flight-assist/sync_tripit.py` reports that as `health_error` in its payload and on stderr, and still emits the sync's diff. Version 1 has no predecessor to migrate; a bump adds its migration to `read_sync_health()`.
+
 ### `current-location.json`
 
 Latest known user location. **Owner is the host orchestrator**, not flight-assist — the host writes this file as Telegram live-location updates and message metadata arrive. flight-assist is a non-owner reader per `coding-policy: stateful-artifacts`: it consults the snapshot to resolve the time-to-leave origin (ladder lives in `precheck._resolve_time_to_leave_origin`), validates the documented shape, and returns `None` on any mismatch instead of raising or migrating.
