@@ -638,3 +638,26 @@ def test_an_implausibly_long_airport_drive_writes_no_block():
     kinds = {c.desired.kind for c in result.plan.creates}
     assert "airport_departure" not in kinds and "airport_arrival" not in kinds
     assert any("implausible 16.8 h drive" in reason for reason in result.skipped)
+
+
+def test_an_implausibly_long_airport_transfer_writes_no_block():
+    """#331 review: the six-hour cap covers different-airport transfers too."""
+    chain = [
+        flight("BNA", "LHR", _dt(9), _dt(15), fid=1, trip_id=9),
+        flight("LGW", "JFK", _dt(20), _dt(23), fid=2, trip_id=9),
+    ]
+
+    def route(origin, dest):
+        hours = 7 if {origin, dest} == {"LHR airport", "LGW airport"} else 0.5
+        return timedelta(hours=hours)
+
+    result = build_reconcile_plan(
+        flights=chain,
+        airport_info=_us_info("BNA", "LHR", "LGW", "JFK"),
+        current_blocks=[],
+        route=route,
+        home_address=HOME,
+        now=NOW,
+    )
+    assert all(c.desired.kind != "airport_transfer" for c in result.plan.creates)
+    assert any(r.startswith("transfer ") and "implausible 7.0 h" in r for r in result.skipped)

@@ -247,6 +247,8 @@ def _build_transfer(leg: ConcreteLeg, *, route: RouteFn) -> tuple[DesiredBlock |
     drive = route(origin, dest)
     if drive is None:
         return None, f"transfer {leg_identity(leg)}: route failed"
+    if drive > MAX_AIRPORT_DRIVE:
+        return None, _implausible("transfer", leg, drive, origin, dest)
     leave_by = leg.window_end - drive
     return (
         DesiredBlock(

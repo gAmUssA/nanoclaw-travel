@@ -321,7 +321,13 @@ def _trip_begins_at(
 _INBOUND_WINDOW = timedelta(hours=12)
 
 
-def _effective_check_in(record: dict, nominal: datetime, schedule: list[dict]) -> datetime:
+def _effective_check_in(
+    record: dict,
+    nominal: datetime,
+    schedule: list[dict],
+    trip_start: date | None,
+    trip_end: date | None,
+) -> datetime:
     """When the operator can actually be at a checked-in lodging.
 
     Only on a hotel change: when the operator was at another lodging earlier
@@ -330,13 +336,14 @@ def _effective_check_in(record: dict, nominal: datetime, schedule: list[dict]) -
     them there, so the check-in takes effect at its arrival. A first lodging
     reached from home (an airport hotel the night before a flight, #235) and
     the morning flight after an airport-hotel night (check-out bound) keep
-    their nominal check-in.
+    their nominal check-in. Prior lodgings and transports count only inside
+    the active trip's span, so an earlier trip's hotel is not a hotel change.
     """
     name = hotel_name(record.get("summary"))
     came_from_lodging = any(
         other.get("type") == "Lodging"
         and hotel_name(other.get("summary")) not in (None, name)
-        and (when := _timed_within(other, None, None)) is not None
+        and (when := _timed_within(other, trip_start, trip_end)) is not None
         and when < nominal
         for other in schedule
     )
@@ -359,7 +366,7 @@ def _effective_check_in(record: dict, nominal: datetime, schedule: list[dict]) -
     for transport in schedule:
         if transport.get("type") not in _DEPARTURE_TYPES:
             continue
-        departs = _timed_within(transport, None, None)
+        departs = _timed_within(transport, trip_start, trip_end)
         if departs is None or not (nominal < departs < limit):
             continue
         if inbound_departure is None or departs < inbound_departure:
@@ -452,7 +459,7 @@ def resolve_anchor(
             continue
         when = parse_schedule_time(record.get("start"))
         if when is not None and lodging_role(record.get("summary")) == CHECK_IN:
-            when = _effective_check_in(record, when, schedule)
+            when = _effective_check_in(record, when, schedule, trip_start, trip_end)
         if when is None or when > at_utc:
             continue
         # Bound lodging to the active trip's span so a prior trip's

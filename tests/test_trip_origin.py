@@ -1073,3 +1073,34 @@ def test_a_mid_stay_flight_days_later_does_not_move_the_check_in():
         schedule, at=datetime.fromisoformat("2026-10-16T16:45:00+00:00"), home_address="home"
     )
     assert anchor.address == "Schiphol Boulevard 701, Schiphol"
+
+
+def test_a_previous_trips_hotel_is_not_a_hotel_change():
+    """#331 review: the first lodging of a trip reached from home keeps its
+    nominal check-in even when an earlier trip's hotel is still in the feed."""
+    schedule = [
+        {"type": "Trip", "summary": "Earlier", "start": "2026-09-01", "end": "2026-09-03"},
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Old Hotel",
+            "start": "2026-09-01T15:00:00Z",
+            "location": "1 Old St, Elsewhere",
+        },
+        {"type": "Trip", "summary": "Now", "start": "2026-10-10", "end": "2026-10-12"},
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Airport Hotel",
+            "start": "2026-10-10T22:00:00Z",
+            "location": "Airport Hotel, Nashville",
+        },
+        {
+            "type": "Flight",
+            "summary": "BNA to SFO",
+            "start": "2026-10-11T07:00:00Z",
+            "end": "2026-10-11T12:00:00Z",
+        },
+    ]
+    anchor = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2026-10-11T05:00:00+00:00"), home_address="home"
+    )
+    assert anchor.address == "Airport Hotel, Nashville"
