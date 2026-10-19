@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.2.148 — 2026-10-19
+
 ### nightly-travel-sync — run the TripIt → Reclaim sync in UTC (#325)
 
 `sync-tripit.sh` ran `reclaim-tripit-timezones-sync` under the container's TZ, which follows the operator's location. East of UTC, the package shifted every all-day trip one day early (jbaruch/reclaim-tripit-timezones-sync#20). The 2026-10-06 run from Europe wrote `[TripIt OOO]` events one day before each trip and missed its last day, and an OOO-gated reminder treated the return-travel day as home. The events flapped back on the next run from a US zone. The wrapper now runs `TZ=UTC node sync.mjs`. OOO events are written and read with an explicit home `timeZone`, so nothing else depends on the process zone. The pin stays after the upstream fix.
