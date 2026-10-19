@@ -334,9 +334,9 @@ def _effective_check_in(
 ) -> datetime:
     """When the operator can actually be at a checked-in lodging.
 
-    Only on a hotel change: the journey's first leg departs after the nominal
-    check-in, before this lodging's check-out, and within _INBOUND_WINDOW of
-    checking out of another lodging. Legs departing within _CONNECTION_WINDOW
+    Only on a hotel change: the journey's first leg arrives after the nominal
+    check-in, departs before this lodging's check-out and within
+    _INBOUND_WINDOW of checking out of another lodging. Legs departing within _CONNECTION_WINDOW
     of the previous arrival continue the journey, and the check-in takes effect
     at its final arrival. A first lodging reached from home (#235) and a
     staging night before an outbound departure keep their nominal check-in.
@@ -375,8 +375,8 @@ def _effective_check_in(
     first = next(
         (
             index
-            for index, (departs, _) in enumerate(legs)
-            if departs > nominal
+            for index, (departs, arrives) in enumerate(legs)
+            if arrives > nominal
             and any(timedelta(0) <= departs - left <= _INBOUND_WINDOW for left in left_lodging)
         ),
         None,

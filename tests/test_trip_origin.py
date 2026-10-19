@@ -1225,3 +1225,26 @@ def test_a_next_morning_departure_does_not_extend_the_inbound_journey():
     )
 
     assert anchor.address == "Schiphol Boulevard 701, Schiphol"
+
+
+def test_a_leg_spanning_the_nominal_check_in_still_defers_it():
+    """#331 review: departing Rome before the 13:00Z nominal check-in and landing
+    after it leaves the operator in transit at check-in time."""
+    schedule = _with_transports(
+        {
+            "type": "Flight",
+            "summary": "KL1606 FCO to AMS",
+            "start": "2025-10-16T12:00:00Z",
+            "end": "2025-10-16T15:00:00Z",
+        }
+    )
+
+    in_transit = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T14:00:00+00:00"), home_address="home"
+    )
+    landed = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T16:00:00+00:00"), home_address="home"
+    )
+
+    assert in_transit.address == "Via de' Ciancaleoni 49, Rome"
+    assert landed.address == "Schiphol Boulevard 701, Schiphol"
