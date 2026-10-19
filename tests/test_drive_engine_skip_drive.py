@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +19,7 @@ import skip_drive  # noqa: E402
 from block_codec import build_extended_properties  # noqa: E402
 from skip_drive import SkipTarget, resolve_skip  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 NOW = datetime(2020, 7, 14, 12, 0, tzinfo=UTC)
 
 

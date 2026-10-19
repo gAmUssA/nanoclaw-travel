@@ -35,7 +35,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _BUNDLE_DIR = Path(__file__).resolve().parent
@@ -143,7 +143,7 @@ def skip_meeting_drive(request: dict, *, calendar=None, now: datetime | None = N
         return {"skipped": False, "error": "request must name a meeting `summary`"}
     summary = summary.strip()
     if now is None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
     _on_path("flight-assist")
     from google_calendar_client import GoogleCalendarClient, GoogleCalendarError

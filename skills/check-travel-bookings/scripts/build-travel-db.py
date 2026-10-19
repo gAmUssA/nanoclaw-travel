@@ -53,7 +53,7 @@ to book — from an away trip that genuinely has no bookings yet (#271).
 import json
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 # travel-core hosts the canonical trip key so the DB's slugs and the drive
@@ -241,7 +241,7 @@ def main():
 
     db = {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "trips": db_trips,
     }
 

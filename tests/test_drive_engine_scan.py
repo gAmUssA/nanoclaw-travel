@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -463,10 +463,10 @@ def test_corrupted_duplicate_flight_still_filtered_by_summary():
     # two with a corrupted timezone whose span (19:55–22:01Z) ends before the
     # true flight window (22:59–01:46Z) starts. Signal 1 misses the corrupt
     # copies; the template summary (signal 2) catches all three.
-    good_start = datetime(2026, 7, 1, 22, 59, tzinfo=timezone.utc)
-    good_end = datetime(2026, 7, 2, 1, 46, tzinfo=timezone.utc)
-    bad_start = datetime(2026, 7, 1, 19, 55, tzinfo=timezone.utc)
-    bad_end = datetime(2026, 7, 1, 22, 1, tzinfo=timezone.utc)
+    good_start = datetime(2026, 7, 1, 22, 59, tzinfo=UTC)
+    good_end = datetime(2026, 7, 2, 1, 46, tzinfo=UTC)
+    bad_start = datetime(2026, 7, 1, 19, 55, tzinfo=UTC)
+    bad_end = datetime(2026, 7, 1, 22, 1, tzinfo=UTC)
     events = [
         _meeting(
             "good",

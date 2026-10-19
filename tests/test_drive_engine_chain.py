@@ -11,7 +11,7 @@ chain's opening departure + closing arrival always exist.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +27,7 @@ from chain import (  # noqa: E402
 )
 from flight_identity import MergedFlight  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _dt(h, mi=0, *, day=12):

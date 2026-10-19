@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -48,7 +48,7 @@ from lodging_source import (  # noqa: E402
 )
 from reconcile import DesiredBlock  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 HOME = "12 Example St, Sampleton, TN 37000"
 HOTEL_ADDRESS = "611 Historic Nature Trail Gatlinburg TN 37738 US"
 HOTEL = "Fairfield Inn & Suites"

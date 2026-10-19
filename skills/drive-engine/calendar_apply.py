@@ -29,7 +29,7 @@ import time
 import urllib.error
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -113,7 +113,7 @@ def _start_in_local(start: datetime, tz_name: str | None) -> tuple[datetime, str
             return start.astimezone(ZoneInfo(tz_name)), tz_name
         except (ZoneInfoNotFoundError, ValueError):
             pass
-    return start.astimezone(timezone.utc), "UTC"
+    return start.astimezone(UTC), "UTC"
 
 
 def build_create_args(desired: DesiredBlock, *, calendar_id: str) -> dict:
@@ -280,7 +280,7 @@ def apply_plan(
     determinism reason, defaulting to the real clock.
     """
     result = ApplyResult()
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     deadline = monotonic() + budget_seconds if budget_seconds is not None else None
 
     def over_budget() -> bool:

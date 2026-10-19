@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone, tzinfo
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
 import pytest
@@ -1265,7 +1265,7 @@ def test_list_flight_state_ids_skips_non_flight_files(state_root: Path):
 
 # --- resolve_live_origin (the shared origin ladder) ----------------------------
 
-_NOW = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
 
 
 def _write_location(state_root: Path, captured_at: str) -> None:

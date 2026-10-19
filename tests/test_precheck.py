@@ -13,7 +13,7 @@ import json
 import subprocess
 import sys
 import urllib.error
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -181,7 +181,7 @@ def test_build_flight_state_preserves_marketing_code_over_operating_designator()
         raw_flight=raw_flight,
         new_snapshot=new_snapshot,
         phase_markers=_phase_markers(),
-        now_utc=datetime(2026, 7, 12, 12, 0, 0, tzinfo=timezone.utc),
+        now_utc=datetime(2026, 7, 12, 12, 0, 0, tzinfo=UTC),
     )
 
     assert state["code"] == "DL4908"  # ...but the record keeps the marketing code
@@ -201,7 +201,7 @@ def test_build_flight_state_seeds_code_from_poll_when_no_prior():
         raw_flight=raw_flight,
         new_snapshot=new_snapshot,
         phase_markers=_phase_markers(),
-        now_utc=datetime(2026, 7, 12, 12, 0, 0, tzinfo=timezone.utc),
+        now_utc=datetime(2026, 7, 12, 12, 0, 0, tzinfo=UTC),
     )
 
     assert state["code"] == "9E4908"
@@ -272,7 +272,7 @@ def test_origin_ladder_prefers_fresh_current_location(state_root: Path):
     `home_address` — the time-to-leave query uses the live coordinates
     formatted as `"lat,lng"` (the Distance Matrix API accepts the
     numeric pair natively)."""
-    now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
     _write_current_location(state_root, captured_at="2026-05-20T11:40:00Z")
     origin = precheck._resolve_time_to_leave_origin(
         home_address="1 Infinite Loop, Cupertino, CA", now_utc=now
@@ -283,7 +283,7 @@ def test_origin_ladder_prefers_fresh_current_location(state_root: Path):
 def test_origin_ladder_falls_back_to_home_when_location_stale(state_root: Path):
     """A stale snapshot (older than `_MAX_CURRENT_LOCATION_AGE_MINUTES`)
     is ignored; the precheck falls back to `home_address`."""
-    now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
     _write_current_location(state_root, captured_at="2026-05-20T11:00:00Z")  # 60 min old
     origin = precheck._resolve_time_to_leave_origin(
         home_address="1 Infinite Loop, Cupertino, CA", now_utc=now
@@ -295,7 +295,7 @@ def test_origin_ladder_ignores_future_captured_at(state_root: Path):
     """A `captured_at` later than `now_utc` is rejected as untrusted
     (clock skew / corruption) — fall back to `home_address` rather
     than honour a snapshot from the future."""
-    now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
     _write_current_location(state_root, captured_at="2026-05-20T13:00:00Z")
     origin = precheck._resolve_time_to_leave_origin(
         home_address="1 Infinite Loop, Cupertino, CA", now_utc=now
@@ -306,7 +306,7 @@ def test_origin_ladder_ignores_future_captured_at(state_root: Path):
 def test_origin_ladder_falls_back_to_home_when_location_missing(state_root: Path):
     """No `current-location.json` on disk → `home_address` is the
     origin (today's behaviour, preserved)."""
-    now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
     origin = precheck._resolve_time_to_leave_origin(
         home_address="1 Infinite Loop, Cupertino, CA", now_utc=now
     )
@@ -317,7 +317,7 @@ def test_origin_ladder_returns_none_when_no_origin(state_root: Path):
     """No location AND no home_address → None; the caller skips the
     maps query entirely. Today's silent-failure mode for a user who
     completed neither `/setup` nor live-location sharing."""
-    now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
     origin = precheck._resolve_time_to_leave_origin(home_address=None, now_utc=now)
     assert origin is None
 
@@ -331,7 +331,7 @@ def test_no_active_flights_yields_no_events(state_root: Path):
     """Empty active-flights index returns []."""
     write_active_flights([])
     with patch("precheck.ByAirClient.from_env"):
-        events = precheck._run_cycle(now_utc=datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc))
+        events = precheck._run_cycle(now_utc=datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC))
     assert events == []
 
 
@@ -345,7 +345,7 @@ def test_run_cycle_passes_bounded_per_call_timeout_to_byair_client(state_root: P
     """
     write_active_flights([])
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
-        precheck._run_cycle(now_utc=datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc))
+        precheck._run_cycle(now_utc=datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC))
     mock_byair_from_env.assert_called_once_with(timeout=precheck._BYAIR_CALL_TIMEOUT_SECONDS)
     assert precheck._BYAIR_CALL_TIMEOUT_SECONDS == 8.0
 
@@ -362,7 +362,7 @@ def test_run_cycle_passes_bounded_per_call_timeout_to_maps_client(state_root: Pa
     write_active_flights([])
     monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "synthetic-key")
     with patch("precheck.MapsClient.from_env") as mock_maps_from_env:
-        precheck._run_cycle(now_utc=datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc))
+        precheck._run_cycle(now_utc=datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC))
     mock_maps_from_env.assert_called_once_with(timeout=precheck._MAPS_CALL_TIMEOUT_SECONDS)
     assert precheck._MAPS_CALL_TIMEOUT_SECONDS == 8.0
 
@@ -388,9 +388,7 @@ def test_first_cycle_for_new_flight_writes_state_and_fires_day_before(state_root
     write_active_flights([12345])
     fake_flight = _byair_flight(flight_id=12345)
 
-    fake_now = datetime(
-        2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc
-    )  # T-1h, well past day-before window
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)  # T-1h, well past day-before window
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
         events = precheck._run_cycle(now_utc=fake_now)
@@ -431,7 +429,7 @@ def test_day_before_carries_the_label_from_the_operator_zone(state_root: Path):
     """dep 17:00Z on May 18 = 12:00 CDT; now 16:00Z = 11:00 CDT the same day → today."""
     write_active_flights([12345])
     reader = _CountingReader(_CHICAGO)
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = _byair_flight(flight_id=12345)
         events = precheck._run_cycle(now_utc=fake_now, operator_tz_reader=reader)
@@ -445,7 +443,7 @@ def test_day_before_carries_the_label_from_the_operator_zone(state_root: Path):
 def test_day_before_without_a_zone_carries_the_explicit_date(state_root: Path):
     write_active_flights([12345])
     reader = _CountingReader(None)
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = _byair_flight(flight_id=12345)
         events = precheck._run_cycle(now_utc=fake_now, operator_tz_reader=reader)
@@ -460,7 +458,7 @@ def test_operator_zone_is_read_once_per_cycle_across_flights(state_root: Path):
     reader spawn — the memo is per cycle, not per flight."""
     write_active_flights([111, 222, 333])
     reader = _CountingReader(_CHICAGO)
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = lambda flight_id: _byair_flight(
             flight_id=flight_id
@@ -478,7 +476,7 @@ def test_operator_zone_is_not_read_for_a_flight_more_than_a_day_out(state_root: 
     marker. dep 17:00Z May 18, now 12:00Z May 16: 53h out, no label, no spawn."""
     write_active_flights([12345])
     reader = _CountingReader(_CHICAGO)
-    fake_now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = _byair_flight(flight_id=12345)
         events = precheck._run_cycle(now_utc=fake_now, operator_tz_reader=reader)
@@ -498,7 +496,7 @@ def test_operator_zone_is_not_read_when_every_day_before_already_fired(state_roo
     write_flight_state(prior)
     write_active_flights([12345])
     reader = _CountingReader(_CHICAGO)
-    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = _byair_flight(flight_id=12345)
         events = precheck._run_cycle(now_utc=fake_now, operator_tz_reader=reader)
@@ -550,7 +548,7 @@ def test_gate_change_fires_after_readout(state_root: Path):
 
     fake_flight = _byair_flight(flight_id=12345, dep_gate="B7")
     fake_now = datetime(
-        2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc
+        2026, 5, 18, 16, 30, 0, tzinfo=UTC
     )  # past 10-min cadence (last_polled was 15:00)
 
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
@@ -590,7 +588,7 @@ def test_boarding_now_before_planned_window_does_not_fire_boarding_started(state
     )
     write_flight_state(prior)
     write_active_flights([12345])
-    fake_now = datetime(2026, 5, 18, 16, 1, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 1, 0, tzinfo=UTC)
 
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = _boarding_now_flight()
@@ -616,7 +614,7 @@ def test_boarding_now_fires_on_first_poll_inside_planned_window(state_root: Path
     )
     write_flight_state(prior)
     write_active_flights([12345])
-    fake_now = datetime(2026, 5, 18, 16, 35, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 35, 0, tzinfo=UTC)
 
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = _boarding_now_flight()
@@ -639,7 +637,7 @@ def test_boarding_now_fires_when_the_departure_advanced_between_polls(state_root
     )
     write_flight_state(prior)
     write_active_flights([12345])
-    fake_now = datetime(2026, 5, 18, 16, 27, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 27, 0, tzinfo=UTC)
     advanced = _boarding_now_flight()
     advanced["depTime"] = "2026-05-18T16:50:00+00:00"
 
@@ -680,7 +678,7 @@ def test_gate_change_suppressed_before_readout_window(state_root: Path):
     write_active_flights([12345])
 
     fake_flight = _byair_flight(flight_id=12345, dep_gate="D1")  # gate churned D3 → D1
-    fake_now = datetime(2026, 5, 18, 14, 0, 0, tzinfo=timezone.utc)  # before window
+    fake_now = datetime(2026, 5, 18, 14, 0, 0, tzinfo=UTC)  # before window
 
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
@@ -716,7 +714,7 @@ def test_gate_assignment_readout_fires_in_window(state_root: Path):
 
     # New gate D6 with terminal "1"; window opens 15:30 (narrowbody), now 15:40.
     fake_flight = _byair_flight(flight_id=12345, dep_gate="D6", dep_terminal="1")
-    fake_now = datetime(2026, 5, 18, 15, 40, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 15, 40, 0, tzinfo=UTC)
 
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
@@ -764,7 +762,7 @@ def test_gate_assignment_window_resolves_widebody_lead_from_snapshot(state_root:
         dep_terminal="2",
         inbound={"aircraft_model": "Boeing 777-300ER"},  # widebody → 50-min lead
     )
-    fake_now = datetime(2026, 5, 18, 15, 15, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 15, 15, 0, tzinfo=UTC)
 
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
@@ -803,7 +801,7 @@ def test_readout_cycle_drops_dep_gate_change_but_keeps_arr(state_root: Path):
     # in the same poll; the readout fires for the dep gate.
     fake_flight = _byair_flight(flight_id=12345, dep_gate="D6", dep_terminal="1")
     fake_flight["arrGate"] = "A2"
-    fake_now = datetime(2026, 5, 18, 15, 40, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 15, 40, 0, tzinfo=UTC)
 
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
@@ -865,7 +863,7 @@ def test_gate_change_surfaces_when_readout_never_fired(state_root: Path):
     fake_flight = _byair_flight(flight_id=12345, computed_status="en_route", dep_gate="B7")
     fake_flight["arrGate"] = "G5"
     fake_flight["arrTime"] = "2026-05-18T20:30:00+00:00"
-    fake_now = datetime(2026, 5, 18, 20, 0, 0, tzinfo=timezone.utc)  # mid-flight, window long past
+    fake_now = datetime(2026, 5, 18, 20, 0, 0, tzinfo=UTC)  # mid-flight, window long past
 
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
@@ -901,7 +899,7 @@ def test_gate_change_surfaces_when_dep_time_unparseable(state_root: Path):
     write_active_flights([12345])
 
     fake_flight = _byair_flight(flight_id=12345, dep_gate="B7")  # gate moved B25 → B7
-    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
 
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
@@ -945,7 +943,7 @@ def test_poll_cycle_preserves_calendar_events_ledger(state_root: Path):
     write_active_flights([12345])
 
     fake_flight = _byair_flight(flight_id=12345, dep_gate="B7")  # gate change forces a rewrite
-    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
 
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
@@ -988,7 +986,7 @@ def test_cadence_gating_skips_recent_polls(state_root: Path):
     write_flight_state(prior)
     write_active_flights([12345])
 
-    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         events = precheck._run_cycle(now_utc=fake_now)
         # get_flight must NOT have been called (cadence-gated out)
@@ -1020,7 +1018,7 @@ def test_seeded_state_with_no_snapshot_forces_poll(state_root: Path):
     fake_flight = _byair_flight(flight_id=12345, dep_time=scheduled_dep)
     fake_flight["scheduledDepTime"] = scheduled_dep
     fake_flight["scheduledArrTime"] = scheduled_arr
-    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
         events = precheck._run_cycle(now_utc=fake_now)
@@ -1055,7 +1053,7 @@ def test_wall_clock_budget_defers_remaining_slow_flights(state_root: Path):
         clock["t"] += 9.0  # each poll burns 9 simulated seconds
         return _byair_flight(flight_id=flight_id)
 
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = slow_poll
         precheck._run_cycle(now_utc=fake_now, monotonic=fake_monotonic)
@@ -1109,7 +1107,7 @@ def test_cycle_with_every_day_before_fired_keeps_the_full_poll_budget(state_root
     write_active_flights([1, 2, 3])
     clock = {"t": 0.0}
     reader = _CountingReader(_CHICAGO)
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = _timed_poll(clock, 4.0)
         precheck._run_cycle(
@@ -1127,7 +1125,7 @@ def test_flight_that_may_spawn_the_reader_starts_before_the_reserve(state_root: 
     write_active_flights([1, 99])
     clock = {"t": 0.0}
     reader = _CountingReader(_CHICAGO)
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = _timed_poll(clock, 6.0)
         precheck._run_cycle(
@@ -1146,7 +1144,7 @@ def test_reserve_drops_once_the_reader_has_run(state_root: Path):
     write_active_flights([99, 1, 98])
     clock = {"t": 0.0}
     reader = _CountingReader(_CHICAGO)
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = _timed_poll(clock, 3.0)
         events = precheck._run_cycle(
@@ -1164,7 +1162,7 @@ def test_corrupt_record_still_fails_at_its_own_turn_after_earlier_polls(state_ro
     _fired_flight(1)
     (state_root / "flight-7.json").write_text("{not json")
     write_active_flights([1, 7])
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = lambda flight_id: _byair_flight(
             flight_id=flight_id
@@ -1196,7 +1194,7 @@ def test_flight_not_due_for_a_poll_holds_no_reserve(state_root: Path):
     write_active_flights([1, 2, 3])
     clock = {"t": 0.0}
     reader = _CountingReader(_CHICAGO)
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = _timed_poll(clock, 6.0)
         precheck._run_cycle(
@@ -1215,7 +1213,7 @@ def test_io_error_on_a_record_still_fails_at_its_own_turn(state_root: Path):
     _fired_flight(1)
     (state_root / "flight-7.json").mkdir()  # read_text() raises IsADirectoryError
     write_active_flights([1, 7])
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = lambda flight_id: _byair_flight(
             flight_id=flight_id
@@ -1245,7 +1243,7 @@ def test_poll_horizon_skips_flight_departing_beyond_24h(state_root: Path):
     write_flight_state(prior)
     write_active_flights([12345])
 
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         events = precheck._run_cycle(now_utc=fake_now)
         # Beyond the horizon → no byAir poll at all.
@@ -1275,7 +1273,7 @@ def test_poll_horizon_polls_flight_just_inside_24h(state_root: Path):
     fake_flight = _byair_flight(flight_id=12345, dep_time=scheduled_dep)
     fake_flight["scheduledDepTime"] = scheduled_dep
     fake_flight["scheduledArrTime"] = scheduled_arr
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
         precheck._run_cycle(now_utc=fake_now)
@@ -1324,7 +1322,7 @@ def test_byair_transport_error_degrades_only_that_flight(state_root: Path):
     Per `coding-policy: error-handling` "Specific Exceptions" + "Graceful Fallback".
     """
     write_active_flights([12345])
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = urllib.error.URLError(
             "synthetic network failure"
@@ -1342,7 +1340,7 @@ def test_poll_failure_ids_reach_the_caller(state_root: Path):
     """#326: a failed poll is reported through `poll_failures` so main() can
     mark the run as failed instead of emitting a healthy-looking empty cycle."""
     write_active_flights([12345])
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     failed: set[int] = set()
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = precheck.ByAirError(
@@ -1473,7 +1471,7 @@ def test_connection_risk_pass_fires_and_persists_marker(state_root: Path):
     write_flight_state(leg2)
     write_active_flights([1, 2])
 
-    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env"):
         # Both flights have last_polled_at within cadence — get_flight not called
         events = precheck._run_cycle(now_utc=fake_now)
@@ -1546,7 +1544,7 @@ def test_connection_risk_excludes_removed_upstream_flights(state_root: Path):
     write_flight_state(leg2)
     write_active_flights([1, 2])
 
-    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
     # Both flights' polls return not_found upstream — their stale state
     # must not feed the connection-risk pass even though on-disk it
     # would otherwise emit a tight-connection alert.
@@ -1614,7 +1612,7 @@ def test_connection_risk_excludes_poll_failed_flights(state_root: Path):
     write_flight_state(leg2)
     write_active_flights([1, 2])
 
-    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
     # Both polls fail with URLError — neither was verified this cycle.
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = urllib.error.URLError(
@@ -1681,7 +1679,7 @@ def test_connection_risk_honors_config_override(state_root: Path):
     write_flight_state(leg2)
     write_active_flights([1, 2])
 
-    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env"):
         events = precheck._run_cycle(now_utc=fake_now)
     assert not any(e["event"]["reason"] == "connection_at_risk" for e in events)
@@ -1758,7 +1756,7 @@ def test_connection_risk_excludes_budget_deferred_flights(state_root: Path):
         clock["t"] += 25.0  # a single poll exhausts the wall-clock budget
         return _byair_flight(flight_id=flight_id)
 
-    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.side_effect = slow_poll
         events = precheck._run_cycle(now_utc=fake_now, monotonic=fake_monotonic)
@@ -1814,7 +1812,7 @@ def test_connection_risk_fires_when_leg2_is_beyond_poll_horizon(state_root: Path
     fake_flight = _byair_flight(flight_id=1)
     fake_flight["scheduledDepTime"] = "2026-05-19T15:00:00+00:00"
     fake_flight["scheduledArrTime"] = "2026-05-19T18:00:00+00:00"
-    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         mock_byair_from_env.return_value.get_flight.return_value = fake_flight
         events = precheck._run_cycle(now_utc=fake_now)

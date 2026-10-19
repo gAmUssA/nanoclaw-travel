@@ -8,7 +8,7 @@ test reach a real clock.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -52,14 +52,14 @@ def _markers(**overrides) -> dict:
 
 
 def test_day_before_does_not_fire_before_threshold():
-    now = datetime(2026, 5, 17, 16, 59, 0, tzinfo=timezone.utc)  # T-24h01min
+    now = datetime(2026, 5, 17, 16, 59, 0, tzinfo=UTC)  # T-24h01min
     fired, _ = check_day_before(scheduled_dep_time=SCHED_DEP, phase_markers=_markers(), now_utc=now)
     assert fired is False
 
 
 def test_day_before_fires_at_exact_threshold():
     """Exactly T-24h ago is the firing point."""
-    now = datetime(2026, 5, 17, 17, 0, 0, tzinfo=timezone.utc)  # T-24h
+    now = datetime(2026, 5, 17, 17, 0, 0, tzinfo=UTC)  # T-24h
     fired, event = check_day_before(
         scheduled_dep_time=SCHED_DEP, phase_markers=_markers(), now_utc=now
     )
@@ -77,7 +77,7 @@ def test_day_before_fires_at_exact_threshold():
 # the same day.
 
 _INCIDENT_DEP = "2026-09-10T19:50:00-05:00"
-_INCIDENT_NOW = datetime(2026, 9, 10, 17, 3, 0, tzinfo=timezone.utc)  # 12:03 CDT
+_INCIDENT_NOW = datetime(2026, 9, 10, 17, 3, 0, tzinfo=UTC)  # 12:03 CDT
 _CHICAGO = "America/Chicago"
 
 
@@ -98,7 +98,7 @@ def test_same_day_departure_is_labelled_today_with_real_hours():
 
 
 def test_next_day_departure_is_labelled_tomorrow():
-    now = datetime(2026, 9, 10, 1, 0, 0, tzinfo=timezone.utc)  # 20:00 CDT Sep 9, T-23h50m
+    now = datetime(2026, 9, 10, 1, 0, 0, tzinfo=UTC)  # 20:00 CDT Sep 9, T-23h50m
     event = _day_before(_INCIDENT_DEP, now, _CHICAGO)
     assert event["day_label"] == "tomorrow"
     assert event["day_label_tz"] == _CHICAGO
@@ -122,7 +122,7 @@ def test_utc_date_trap_still_says_tomorrow():
     # 22:00 CDT on Sep 10 is already Sep 11 in UTC; a 06:00 CDT Sep 11
     # departure is Sep 11 in UTC too. A UTC comparison says "today" — the
     # operator, still on Sep 10, is told "tomorrow".
-    now = datetime(2026, 9, 11, 3, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 11, 3, 0, 0, tzinfo=UTC)
     event = _day_before("2026-09-11T06:00:00-05:00", now, _CHICAGO)
     assert event["day_label"] == "tomorrow"
     assert event["hours_until_dep"] == 8
@@ -137,7 +137,7 @@ def test_no_operator_zone_falls_back_to_the_airport_local_date():
 def test_fallback_uses_the_departure_offset_not_container_utc():
     # 23:30 EDT Sep 10 is 03:30Z Sep 11. The explicit fallback date is the
     # airport-local Sep 10, never the container's UTC Sep 11.
-    now = datetime(2026, 9, 10, 20, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 9, 10, 20, 0, 0, tzinfo=UTC)
     event = _day_before("2026-09-10T23:30:00-04:00", now, None)
     assert event["day_label"] == "2026-09-10"
     assert event["day_label_tz"] is None
@@ -153,15 +153,15 @@ def test_unresolvable_zone_behaves_like_no_zone(capsys):
 @pytest.mark.parametrize(
     ("sched", "now", "markers", "due"),
     [
-        (SCHED_DEP, datetime(2026, 5, 17, 16, 59, 0, tzinfo=timezone.utc), {}, False),
-        (SCHED_DEP, datetime(2026, 5, 17, 17, 0, 0, tzinfo=timezone.utc), {}, True),
+        (SCHED_DEP, datetime(2026, 5, 17, 16, 59, 0, tzinfo=UTC), {}, False),
+        (SCHED_DEP, datetime(2026, 5, 17, 17, 0, 0, tzinfo=UTC), {}, True),
         (
             SCHED_DEP,
-            datetime(2026, 5, 18, 10, 0, 0, tzinfo=timezone.utc),
+            datetime(2026, 5, 18, 10, 0, 0, tzinfo=UTC),
             {"day_before_fired": True},
             False,
         ),
-        ("not-a-time", datetime(2026, 5, 18, 10, 0, 0, tzinfo=timezone.utc), {}, False),
+        ("not-a-time", datetime(2026, 5, 18, 10, 0, 0, tzinfo=UTC), {}, False),
     ],
 )
 def test_day_before_due_matches_the_gate(sched, now, markers, due):
@@ -178,20 +178,20 @@ def test_day_before_due_matches_the_gate(sched, now, markers, due):
 
 
 def test_exact_threshold_keeps_hours_until_dep_at_24():
-    now = datetime(2026, 5, 17, 17, 0, 0, tzinfo=timezone.utc)  # T-24h exactly
+    now = datetime(2026, 5, 17, 17, 0, 0, tzinfo=UTC)  # T-24h exactly
     event = _day_before(SCHED_DEP, now, "UTC")
     assert event["hours_until_dep"] == 24
     assert event["day_label"] == "tomorrow"
 
 
 def test_day_before_fires_after_threshold():
-    now = datetime(2026, 5, 18, 10, 0, 0, tzinfo=timezone.utc)  # T-7h
+    now = datetime(2026, 5, 18, 10, 0, 0, tzinfo=UTC)  # T-7h
     fired, _ = check_day_before(scheduled_dep_time=SCHED_DEP, phase_markers=_markers(), now_utc=now)
     assert fired is True
 
 
 def test_day_before_does_not_re_fire_when_marker_set():
-    now = datetime(2026, 5, 18, 10, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 10, 0, 0, tzinfo=UTC)
     fired, _ = check_day_before(
         scheduled_dep_time=SCHED_DEP,
         phase_markers=_markers(day_before_fired=True),
@@ -201,7 +201,7 @@ def test_day_before_does_not_re_fire_when_marker_set():
 
 
 def test_day_before_with_malformed_time_does_not_fire():
-    now = datetime(2026, 5, 18, 10, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 10, 0, 0, tzinfo=UTC)
     fired, _ = check_day_before(
         scheduled_dep_time="not-a-time", phase_markers=_markers(), now_utc=now
     )
@@ -215,7 +215,7 @@ def test_day_before_with_malformed_time_does_not_fire():
 
 def test_time_to_leave_does_not_fire_when_travel_time_none():
     """No traffic estimate yet — defer the decision."""
-    now = datetime(2026, 5, 18, 14, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 14, 0, 0, tzinfo=UTC)
     fired, _ = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=None,
@@ -230,7 +230,7 @@ def test_time_to_leave_does_not_fire_before_leave_by():
     travel_minutes = 30
     # Dep is 17:00; with 30 min drive + 15 min buffer, leave_by = 16:15.
     # At 14:00 we have 2h15m before leave_by — way too early.
-    now = datetime(2026, 5, 18, 14, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 14, 0, 0, tzinfo=UTC)
     fired, _ = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=travel_minutes * 60,
@@ -244,7 +244,7 @@ def test_time_to_leave_fires_at_leave_by():
     """At exactly leave_by, fire."""
     travel_minutes = 30
     # leave_by = 17:00 - 30min - 15min = 16:15
-    now = datetime(2026, 5, 18, 16, 15, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 16, 15, 0, tzinfo=UTC)
     fired, event = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=travel_minutes * 60,
@@ -260,7 +260,7 @@ def test_time_to_leave_fires_at_leave_by():
 def test_time_to_leave_fires_past_leave_by():
     """After leave_by (user is already late) — still fire."""
     travel_minutes = 30
-    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=timezone.utc)  # 30 min past leave_by
+    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=UTC)  # 30 min past leave_by
     fired, _ = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=travel_minutes * 60,
@@ -271,7 +271,7 @@ def test_time_to_leave_fires_past_leave_by():
 
 
 def test_time_to_leave_does_not_re_fire_when_marker_set():
-    now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
     fired, _ = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=1800,
@@ -284,7 +284,7 @@ def test_time_to_leave_does_not_re_fire_when_marker_set():
 def test_time_to_leave_buffer_applied():
     """leave_by accounts for TIME_TO_LEAVE_BUFFER_MINUTES on top of travel."""
     # travel = 0, so leave_by = dep - buffer
-    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=UTC)
     # 16:45 is dep - 15min, which is exactly leave_by when travel=0
     fired, _ = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
@@ -319,7 +319,7 @@ def _boarding_snapshot(**overrides) -> dict:
 def test_time_to_leave_suppressed_when_really_boarding():
     """#102 — leave-by is moot once boarding has actually started, even if the
     leave-by threshold is met (delayed flight / stale travel estimate)."""
-    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=timezone.utc)  # past leave_by
+    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=UTC)  # past leave_by
     fired, _ = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=1800,
@@ -333,7 +333,7 @@ def test_time_to_leave_suppressed_when_really_boarding():
 def test_time_to_leave_not_suppressed_by_premature_boarding_label():
     """byAir's early "boarding" label (detail still counting down) is not real
     boarding — the leave-by alert must still fire."""
-    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=UTC)
     fired, _ = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=1800,
@@ -348,7 +348,7 @@ def test_time_to_leave_with_lead_ignores_premature_boarding_now_before_window():
     """#295 — byAir's "Boarding now" 45 min before departure on a 30-min-lead
     flight is before the planned boarding window (16:30); the leave-by alert
     still fires."""
-    now = datetime(2026, 5, 18, 16, 15, 0, tzinfo=timezone.utc)  # pre-window (16:30)
+    now = datetime(2026, 5, 18, 16, 15, 0, tzinfo=UTC)  # pre-window (16:30)
     fired, _ = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=1800,  # leave_by = 17:00 − 30 min − 15 min buffer = 16:15
@@ -363,7 +363,7 @@ def test_time_to_leave_with_lead_ignores_premature_boarding_now_before_window():
 def test_time_to_leave_with_lead_suppressed_once_window_is_open():
     """#295 — the same label inside the planned boarding window is real boarding;
     the leave-by alert is moot."""
-    now = datetime(2026, 5, 18, 16, 31, 0, tzinfo=timezone.utc)  # window opened 16:30
+    now = datetime(2026, 5, 18, 16, 31, 0, tzinfo=UTC)  # window opened 16:30
     fired, _ = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=0,
@@ -377,7 +377,7 @@ def test_time_to_leave_with_lead_suppressed_once_window_is_open():
 
 def test_time_to_leave_without_lead_keeps_label_only_predicate():
     """No lead → no window; the pre-#295 label-plus-detail predicate decides."""
-    now = datetime(2026, 5, 18, 16, 15, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 16, 15, 0, tzinfo=UTC)
     fired, _ = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=0,
@@ -390,7 +390,7 @@ def test_time_to_leave_without_lead_keeps_label_only_predicate():
 
 def test_time_to_leave_suppressed_when_departed_or_cancelled():
     """Once the flight has left or been cancelled, leave-by never fires."""
-    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=UTC)
     for status in ("departed", "en_route", "landed", "cancelled", "diverted"):
         fired, _ = check_time_to_leave(
             scheduled_dep_time=SCHED_DEP,
@@ -404,7 +404,7 @@ def test_time_to_leave_suppressed_when_departed_or_cancelled():
 
 def test_time_to_leave_fires_pre_boarding_with_scheduled_snapshot():
     """Regression: a still-scheduled flight at the leave-by threshold fires."""
-    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=UTC)
     fired, event = check_time_to_leave(
         scheduled_dep_time=SCHED_DEP,
         travel_time_seconds=0,
@@ -423,7 +423,7 @@ def test_time_to_leave_fires_pre_boarding_with_scheduled_snapshot():
 
 
 def test_arrival_logistics_does_not_fire_before_threshold():
-    now = datetime(2026, 5, 18, 19, 44, 0, tzinfo=timezone.utc)  # T-arr - 16min
+    now = datetime(2026, 5, 18, 19, 44, 0, tzinfo=UTC)  # T-arr - 16min
     fired, _ = check_arrival_logistics(
         scheduled_arr_time=SCHED_ARR, phase_markers=_markers(), now_utc=now
     )
@@ -431,7 +431,7 @@ def test_arrival_logistics_does_not_fire_before_threshold():
 
 
 def test_arrival_logistics_fires_at_threshold():
-    now = datetime(2026, 5, 18, 19, 45, 0, tzinfo=timezone.utc)  # T-arr - 15min
+    now = datetime(2026, 5, 18, 19, 45, 0, tzinfo=UTC)  # T-arr - 15min
     fired, event = check_arrival_logistics(
         scheduled_arr_time=SCHED_ARR, phase_markers=_markers(), now_utc=now
     )
@@ -442,7 +442,7 @@ def test_arrival_logistics_fires_at_threshold():
 
 
 def test_arrival_logistics_fires_after_threshold():
-    now = datetime(2026, 5, 18, 19, 55, 0, tzinfo=timezone.utc)  # T-arr - 5min
+    now = datetime(2026, 5, 18, 19, 55, 0, tzinfo=UTC)  # T-arr - 5min
     fired, _ = check_arrival_logistics(
         scheduled_arr_time=SCHED_ARR, phase_markers=_markers(), now_utc=now
     )
@@ -450,7 +450,7 @@ def test_arrival_logistics_fires_after_threshold():
 
 
 def test_arrival_logistics_does_not_re_fire_when_marker_set():
-    now = datetime(2026, 5, 18, 19, 50, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 19, 50, 0, tzinfo=UTC)
     fired, _ = check_arrival_logistics(
         scheduled_arr_time=SCHED_ARR,
         phase_markers=_markers(arrival_logistics_fired=True),
@@ -460,7 +460,7 @@ def test_arrival_logistics_does_not_re_fire_when_marker_set():
 
 
 def test_arrival_logistics_with_malformed_time_does_not_fire():
-    now = datetime(2026, 5, 18, 20, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 20, 0, 0, tzinfo=UTC)
     fired, _ = check_arrival_logistics(
         scheduled_arr_time=None, phase_markers=_markers(), now_utc=now
     )
@@ -482,7 +482,7 @@ def _gate_snapshot(*, dep_gate: str | None, dep_terminal: str | None = None) -> 
 
 def test_gate_assignment_does_not_fire_before_window():
     """Gate present at T−3h (before the window) — no readout."""
-    now = datetime(2026, 5, 18, 14, 0, 0, tzinfo=timezone.utc)  # T−3h, window opens 15:30
+    now = datetime(2026, 5, 18, 14, 0, 0, tzinfo=UTC)  # T−3h, window opens 15:30
     fired, _ = check_gate_assignment(
         scheduled_dep_time=SCHED_DEP,
         boarding_lead_minutes=NARROWBODY_LEAD,
@@ -495,7 +495,7 @@ def test_gate_assignment_does_not_fire_before_window():
 
 def test_gate_assignment_fires_when_window_opens_with_gate():
     """Window opens with a gate present → one readout carrying gate + terminal."""
-    now = datetime(2026, 5, 18, 15, 30, 0, tzinfo=timezone.utc)  # exactly window-open
+    now = datetime(2026, 5, 18, 15, 30, 0, tzinfo=UTC)  # exactly window-open
     fired, event = check_gate_assignment(
         scheduled_dep_time=SCHED_DEP,
         boarding_lead_minutes=NARROWBODY_LEAD,
@@ -512,7 +512,7 @@ def test_gate_assignment_fires_when_window_opens_with_gate():
 
 def test_gate_assignment_defers_until_gate_appears_in_window():
     """Gate null when the window opens → defer; readout fires on first appearance."""
-    in_window = datetime(2026, 5, 18, 15, 40, 0, tzinfo=timezone.utc)
+    in_window = datetime(2026, 5, 18, 15, 40, 0, tzinfo=UTC)
     fired_no_gate, _ = check_gate_assignment(
         scheduled_dep_time=SCHED_DEP,
         boarding_lead_minutes=NARROWBODY_LEAD,
@@ -522,7 +522,7 @@ def test_gate_assignment_defers_until_gate_appears_in_window():
     )
     assert fired_no_gate is False
 
-    later = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    later = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     fired_gate, event = check_gate_assignment(
         scheduled_dep_time=SCHED_DEP,
         boarding_lead_minutes=NARROWBODY_LEAD,
@@ -537,7 +537,7 @@ def test_gate_assignment_defers_until_gate_appears_in_window():
 
 
 def test_gate_assignment_does_not_re_fire_when_marker_set():
-    now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     fired, _ = check_gate_assignment(
         scheduled_dep_time=SCHED_DEP,
         boarding_lead_minutes=NARROWBODY_LEAD,
@@ -551,7 +551,7 @@ def test_gate_assignment_does_not_re_fire_when_marker_set():
 def test_gate_assignment_window_widens_for_widebody_lead():
     """A 50-min boarding lead opens the window 20 min earlier than the 30-min lead."""
     # At 15:20: narrowbody window (opens 15:30) not yet open; widebody (opens 15:10) is.
-    now = datetime(2026, 5, 18, 15, 20, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 15, 20, 0, tzinfo=UTC)
     snapshot = _gate_snapshot(dep_gate="E16", dep_terminal="2")
     fired_narrow, _ = check_gate_assignment(
         scheduled_dep_time=SCHED_DEP,
@@ -576,7 +576,7 @@ def test_gate_assignment_suppressed_when_boarding_or_gone():
     navigating to a departure gate is moot by then. The boarding case sits
     inside the planned boarding window (opens 16:30 for a 30-min lead): only
     there does the label count as real boarding (#295)."""
-    now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)  # in readout window
+    now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)  # in readout window
     for snapshot in (
         {"computed_status": "departed", "dep_gate": "E16"},
         {"computed_status": "cancelled", "dep_gate": "E16"},
@@ -599,7 +599,7 @@ def test_gate_assignment_suppressed_when_boarding_or_gone():
             "dep_gate": "E16",
         },
         phase_markers=_markers(),
-        now_utc=datetime(2026, 5, 18, 16, 35, 0, tzinfo=timezone.utc),  # in boarding window
+        now_utc=datetime(2026, 5, 18, 16, 35, 0, tzinfo=UTC),  # in boarding window
     )
     assert fired is False
 
@@ -608,7 +608,7 @@ def test_gate_assignment_not_suppressed_by_boarding_now_before_the_window():
     """#295 — "Boarding now" at T-60 on a 30-min-lead flight is byAir's early
     flip, not boarding; the readout must still fire so the operator learns
     the terminal."""
-    now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)  # window opens 16:30
+    now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)  # window opens 16:30
     fired, event = check_gate_assignment(
         scheduled_dep_time=SCHED_DEP,
         boarding_lead_minutes=NARROWBODY_LEAD,
@@ -630,7 +630,7 @@ def test_gate_assignment_not_suppressed_by_boarding_now_before_the_window():
 def test_gate_assignment_not_suppressed_by_premature_boarding_label():
     """byAir's early "boarding" label (detail still counting down) is not real
     boarding — the readout must still fire."""
-    now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     fired, event = check_gate_assignment(
         scheduled_dep_time=SCHED_DEP,
         boarding_lead_minutes=NARROWBODY_LEAD,
@@ -649,7 +649,7 @@ def test_gate_assignment_not_suppressed_by_premature_boarding_label():
 
 
 def test_gate_assignment_with_malformed_time_does_not_fire():
-    now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     fired, _ = check_gate_assignment(
         scheduled_dep_time="not-a-time",
         boarding_lead_minutes=NARROWBODY_LEAD,
@@ -680,7 +680,7 @@ def test_boarding_window_open_follows_a_delayed_live_departure():
         boarding_lead_minutes=30,
         snapshot={"computed_status": "boarding", "dep_time": "2026-05-18T18:00:00+00:00"},
     )
-    assert window == datetime(2026, 5, 18, 17, 30, 0, tzinfo=timezone.utc)
+    assert window == datetime(2026, 5, 18, 17, 30, 0, tzinfo=UTC)
 
 
 @pytest.mark.parametrize("dep_time", [None, "", "not-a-time"])
@@ -690,7 +690,7 @@ def test_boarding_window_open_falls_back_to_scheduled_without_a_live_departure(d
         boarding_lead_minutes=30,
         snapshot={"computed_status": "boarding", "dep_time": dep_time},
     )
-    assert window == datetime(2026, 5, 18, 16, 30, 0, tzinfo=timezone.utc)
+    assert window == datetime(2026, 5, 18, 16, 30, 0, tzinfo=UTC)
 
 
 def test_is_boarding_or_gone_delayed_flight_holds_the_label_to_the_delayed_block():
@@ -705,8 +705,8 @@ def test_is_boarding_or_gone_delayed_flight_holds_the_label_to_the_delayed_block
     window = boarding_window_open(
         scheduled_dep_time=SCHED_DEP, boarding_lead_minutes=30, snapshot=snapshot
     )
-    early = datetime(2026, 5, 18, 16, 50, 0, tzinfo=timezone.utc)
-    inside = datetime(2026, 5, 18, 17, 31, 0, tzinfo=timezone.utc)
+    early = datetime(2026, 5, 18, 16, 50, 0, tzinfo=UTC)
+    inside = datetime(2026, 5, 18, 17, 31, 0, tzinfo=UTC)
     assert is_boarding_or_gone(snapshot, boarding_window_open=window, at=early) is False
     assert is_boarding_or_gone(snapshot, boarding_window_open=window, at=inside) is True
 
@@ -760,7 +760,7 @@ def test_is_boarding_or_gone_without_window_keeps_label_predicate():
 def test_naive_iso_string_treated_as_utc():
     """A scheduled time without offset is treated as UTC (per parse helper docstring)."""
     sched = "2026-05-18T17:00:00"  # no offset
-    now = datetime(2026, 5, 18, 10, 0, 0, tzinfo=timezone.utc)  # T-7h
+    now = datetime(2026, 5, 18, 10, 0, 0, tzinfo=UTC)  # T-7h
     fired, _ = check_day_before(scheduled_dep_time=sched, phase_markers=_markers(), now_utc=now)
     assert fired is True
 
@@ -769,6 +769,6 @@ def test_zulu_suffixed_iso_string_parses():
     """A trailing 'Z' must not silently suppress a time-based marker (Python < 3.11
     rejects 'Z' in fromisoformat; scheduled times can come back zulu-suffixed)."""
     sched = "2026-05-18T17:00:00Z"
-    now = datetime(2026, 5, 18, 10, 0, 0, tzinfo=timezone.utc)  # T-7h
+    now = datetime(2026, 5, 18, 10, 0, 0, tzinfo=UTC)  # T-7h
     fired, _ = check_day_before(scheduled_dep_time=sched, phase_markers=_markers(), now_utc=now)
     assert fired is True

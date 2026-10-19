@@ -21,7 +21,7 @@ import argparse
 import json
 import re
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 SCHEDULE_PATH = "/workspace/group/travel-schedule.json"
@@ -83,8 +83,8 @@ def _parse_instant(value: str) -> datetime:
             f"{value!r} is not an ISO-8601 instant — expected e.g. 2026-08-09T00:00:00Z"
         ) from exc
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 class ScheduleError(ValueError):

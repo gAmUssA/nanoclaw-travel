@@ -10,7 +10,7 @@ the window between them, with buffer policy delegated to airport_lead (domestic
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -27,7 +27,7 @@ from leg_anchor import (  # noqa: E402
     resolve_leg_anchor,
 )
 
-UTC = timezone.utc
+UTC = UTC
 US = "🇺🇸"
 GB = "🇬🇧"
 DK = "🇩🇰"

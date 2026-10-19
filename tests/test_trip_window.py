@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -21,7 +21,7 @@ from trip_window import evaluate_trip_window  # noqa: E402
 
 # A fixed reference instant for every case (UTC) — a fixed PAST date so the
 # suite never depends on the run date (testing-standards).
-NOW = datetime(2020, 7, 15, 12, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2020, 7, 15, 12, 0, 0, tzinfo=UTC)
 
 
 def _write_db(tmp_path: Path, payload) -> str:
@@ -69,27 +69,27 @@ def test_past_trip_beyond_24h_trail_is_out(tmp_path: Path):
 
 def test_exactly_24h_before_start_is_in_window(tmp_path: Path):
     # start 2020-07-16 → window opens exactly 2020-07-15T00:00Z.
-    at_open = datetime(2020, 7, 15, 0, 0, 0, tzinfo=timezone.utc)
+    at_open = datetime(2020, 7, 15, 0, 0, 0, tzinfo=UTC)
     path = _write_db(tmp_path, _db({"osl": {"start": "2020-07-16", "end": "2020-07-20"}}))
     assert evaluate_trip_window(now_utc=at_open, path=path).in_window is True
 
 
 def test_one_second_before_24h_lead_is_out(tmp_path: Path):
-    just_before = datetime(2020, 7, 14, 23, 59, 59, tzinfo=timezone.utc)
+    just_before = datetime(2020, 7, 14, 23, 59, 59, tzinfo=UTC)
     path = _write_db(tmp_path, _db({"osl": {"start": "2020-07-16", "end": "2020-07-20"}}))
     assert evaluate_trip_window(now_utc=just_before, path=path).in_window is False
 
 
 def test_last_day_before_end_plus_24h_is_in_window(tmp_path: Path):
     # end 2020-07-14 → window closes 2020-07-15T00:00Z; 23:59:59 the day before is in.
-    late_final_day = datetime(2020, 7, 14, 23, 59, 59, tzinfo=timezone.utc)
+    late_final_day = datetime(2020, 7, 14, 23, 59, 59, tzinfo=UTC)
     path = _write_db(tmp_path, _db({"osl": {"start": "2020-07-10", "end": "2020-07-14"}}))
     assert evaluate_trip_window(now_utc=late_final_day, path=path).in_window is True
 
 
 def test_exactly_end_plus_24h_is_out(tmp_path: Path):
     # end 2020-07-14 → window closes exactly 2020-07-15T00:00Z (exclusive).
-    at_close = datetime(2020, 7, 15, 0, 0, 0, tzinfo=timezone.utc)
+    at_close = datetime(2020, 7, 15, 0, 0, 0, tzinfo=UTC)
     path = _write_db(tmp_path, _db({"osl": {"start": "2020-07-10", "end": "2020-07-14"}}))
     assert evaluate_trip_window(now_utc=at_close, path=path).in_window is False
 

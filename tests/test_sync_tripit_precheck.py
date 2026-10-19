@@ -7,7 +7,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
@@ -89,7 +89,7 @@ def _flight_state(flight_id: int, *, dep_time: datetime) -> dict:
 
 def test_should_sync_cold_start_no_state(state_root):
     """No active-flights.json exists yet → first sync ever."""
-    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
     should, reason = precheck._should_sync_now(state_module, now=now)
     assert should is True
     assert reason == "cold_start_no_state_file"
@@ -99,7 +99,7 @@ def test_should_sync_empty_state_recent_file(state_root):
     """State file exists but holds zero flights; mtime is fresh.
     Result: no imminent flights AND state is recent → skip the byAir call."""
     write_active_flights([])
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     should, reason = precheck._should_sync_now(state_module, now=now)
     assert should is False
     assert reason == "no_imminent_flights_recent_sync"
@@ -112,7 +112,7 @@ def test_should_sync_stale_state_triggers_sync(state_root):
     # Backdate mtime to 7 hours ago — past the 6h threshold.
     old_ts = time.time() - 7 * 3600
     os.utime(active_path, (old_ts, old_ts))
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     should, reason = precheck._should_sync_now(state_module, now=now)
     assert should is True
     assert reason.startswith("stale_state_age_")
@@ -120,7 +120,7 @@ def test_should_sync_stale_state_triggers_sync(state_root):
 
 def test_should_sync_imminent_flight_triggers_sync(state_root):
     """Any tracked flight with scheduled_dep_time in next 24h → poll for delays/gate changes."""
-    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
     # Flight 4 hours from now — imminent.
     write_flight_state(_flight_state(101, dep_time=now + timedelta(hours=4)))
     write_active_flights([101])
@@ -131,7 +131,7 @@ def test_should_sync_imminent_flight_triggers_sync(state_root):
 
 def test_should_sync_flight_outside_24h_with_recent_state_skips(state_root):
     """Flight 48 hours away + recent state → both gates fail, skip."""
-    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
     write_flight_state(_flight_state(202, dep_time=now + timedelta(hours=48)))
     write_active_flights([202])
     should, reason = precheck._should_sync_now(state_module, now=now)
@@ -142,7 +142,7 @@ def test_should_sync_flight_outside_24h_with_recent_state_skips(state_root):
 def test_should_sync_flight_in_past_is_not_imminent(state_root):
     """Flight whose scheduled_dep_time has already passed shouldn't count as imminent.
     Edge case: a flight that departed an hour ago is in the past, not the future window."""
-    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
     write_flight_state(_flight_state(303, dep_time=now - timedelta(hours=1)))
     write_active_flights([303])
     should, reason = precheck._should_sync_now(state_module, now=now)
@@ -152,7 +152,7 @@ def test_should_sync_flight_in_past_is_not_imminent(state_root):
 
 def test_should_sync_one_imminent_among_many_triggers(state_root):
     """First-match-wins on the imminent gate. Two flights tracked: one in 48h, one in 6h."""
-    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
     write_flight_state(_flight_state(404, dep_time=now + timedelta(hours=48)))
     write_flight_state(_flight_state(505, dep_time=now + timedelta(hours=6)))
     write_active_flights([404, 505])
@@ -167,7 +167,7 @@ def test_should_sync_malformed_dep_time_is_skipped_not_crashed(state_root):
     """A flight state with malformed scheduled_dep_time should be skipped in the
     gate without crashing the precheck — the owner skill's writer validates the
     field, so a malformed value indicates a writer-side bug, not a gate concern."""
-    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
     bad_state = _flight_state(606, dep_time=now + timedelta(hours=4))
     bad_state["scheduled_dep_time"] = "not-a-real-iso-string"
     write_flight_state(bad_state)
@@ -201,7 +201,7 @@ def test_should_sync_does_not_migrate_old_active_flights(state_root):
     before_mtime = active_path.stat().st_mtime_ns
     before_bytes = active_path.read_bytes()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     should, reason = precheck._should_sync_now(state_module, now=now)
 
     # Old schema is "no usable prior state" → falls through to the
@@ -246,7 +246,7 @@ def test_main_emits_wake_false_on_no_sync_gate(state_root, monkeypatch):
 def test_main_delegates_to_sync_tripit_on_gate_pass(state_root, monkeypatch):
     """When the gate passes, the precheck spawns sync_tripit.py and forwards
     its stdout verbatim."""
-    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
     write_flight_state(_flight_state(707, dep_time=now + timedelta(hours=2)))
     write_active_flights([707])
 
@@ -273,7 +273,7 @@ def test_main_delegates_to_sync_tripit_on_gate_pass(state_root, monkeypatch):
 def test_main_handles_empty_sync_subprocess_stdout(state_root, monkeypatch):
     """If sync_tripit.py crashed and produced no stdout, the precheck must
     emit a safe-shape payload so the cadence-registry isn't fed invalid JSON."""
-    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
     write_flight_state(_flight_state(808, dep_time=now + timedelta(hours=2)))
     write_active_flights([808])
 
@@ -301,7 +301,7 @@ def test_main_handles_subprocess_timeout(state_root, monkeypatch):
     unhandled exception that the agent-runner reads as 'skip wake'."""
     import subprocess as _subprocess
 
-    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
     write_flight_state(_flight_state(909, dep_time=now + timedelta(hours=2)))
     write_active_flights([909])
 
@@ -347,7 +347,7 @@ def test_subprocess_timeout_branch_is_reachable(state_root, monkeypatch, tmp_pat
     hung_child = tmp_path / "hung_sync_tripit.py"
     hung_child.write_text("import time\n\ntime.sleep(30)\n", encoding="utf-8")
 
-    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=timezone.utc)
+    now = datetime(2026, 5, 22, 12, 0, 0, tzinfo=UTC)
     write_flight_state(_flight_state(910, dep_time=now + timedelta(hours=2)))
     write_active_flights([910])
 

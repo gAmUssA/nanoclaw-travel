@@ -10,7 +10,7 @@ imminence window.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -29,7 +29,7 @@ from position import (  # noqa: E402
 )
 from trip_origin import TripAnchor  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 HOME = "12 Example St, Sampleton, TN 37000"
 HOTEL = "Hotel Skt Petri, Copenhagen"
 

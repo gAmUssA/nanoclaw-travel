@@ -11,7 +11,7 @@ treated as done.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +24,7 @@ from calendar_apply import ApplyResult, apply_plan, build_create_args  # noqa: E
 from google_calendar_client import GoogleCalendarError  # noqa: E402
 from reconcile import Convert, Create, Delete, DesiredBlock, ReconcilePlan, Update  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _dt(h, mi=0):

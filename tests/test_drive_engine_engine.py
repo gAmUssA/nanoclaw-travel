@@ -13,7 +13,7 @@ and unroutable legs are suppressed/skipped.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +24,7 @@ from block_codec import GEN_LEGACY_FADRIVE, GEN_UNIFIED, ParsedBlock  # noqa: E4
 from engine import AirportInfo, build_reconcile_plan  # noqa: E402
 from flight_identity import BYAIR, TRIPIT, Flight  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 HOME = "12 Example St, TN"
 NOW = datetime(2020, 7, 10, 12, 0, tzinfo=UTC)  # well before the trip → plan wins
 US = "🇺🇸"

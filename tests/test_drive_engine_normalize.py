@@ -10,7 +10,7 @@ fields are enforced.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -22,7 +22,7 @@ sys.path.insert(0, str(REPO_ROOT / "skills" / "drive-engine"))
 from flight_identity import BYAIR, TRIPIT  # noqa: E402
 from normalize import flight_from_byair, flight_from_tripit_segment  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _byair_record(**over):

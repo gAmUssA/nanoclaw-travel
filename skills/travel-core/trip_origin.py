@@ -60,7 +60,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 # Co-located in this bundle; import by module name so consumers that put the
@@ -167,8 +167,8 @@ def parse_schedule_time(value) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _parse_day(value) -> date | None:
@@ -345,7 +345,7 @@ def resolve_anchor(
     if not schedule:
         return TripAnchor(address=home_address, source="home")
 
-    at_utc = at.astimezone(timezone.utc)
+    at_utc = at.astimezone(UTC)
     trip = _active_trip(schedule, at_utc.date())
     if trip is None:
         return TripAnchor(address=home_address, source="home")
@@ -539,7 +539,7 @@ def opened_from_home(
         return planned.address is not None
     if not schedule:
         return False
-    trip = _active_trip(schedule, at.astimezone(timezone.utc).date())
+    trip = _active_trip(schedule, at.astimezone(UTC).date())
     if trip is None:
         return False
     trip_start = _parse_day(trip.get("start"))

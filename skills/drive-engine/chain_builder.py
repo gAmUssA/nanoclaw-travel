@@ -13,7 +13,7 @@ location fix and passes in as a predicate. No clock, no network here.
 from __future__ import annotations
 
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from chain import PairContext
 from flight_identity import MergedFlight
@@ -105,7 +105,7 @@ def _spans_overnight(start: datetime, end: datetime) -> bool:
     cross-night stay (the real Tel Aviv stay spans Aug 2 → Aug 6) still crosses a
     day boundary and stands.
     """
-    return start.astimezone(timezone.utc).date() != end.astimezone(timezone.utc).date()
+    return start.astimezone(UTC).date() != end.astimezone(UTC).date()
 
 
 def has_lodging_between(schedule: list[dict] | None, start: datetime, end: datetime) -> bool:
