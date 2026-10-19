@@ -1104,3 +1104,107 @@ def test_a_previous_trips_hotel_is_not_a_hotel_change():
         schedule, at=datetime.fromisoformat("2026-10-11T05:00:00+00:00"), home_address="home"
     )
     assert anchor.address == "Airport Hotel, Nashville"
+
+
+def _with_transports(*transports: dict) -> list[dict]:
+    schedule = [record for record in _rome_to_amsterdam_schedule() if record["type"] != "Flight"]
+    return schedule + list(transports)
+
+
+@pytest.mark.parametrize(
+    "legs",
+    [
+        pytest.param(
+            (
+                {
+                    "type": "Rail",
+                    "summary": "Roma Termini to Fiumicino Aeroporto",
+                    "start": "2025-10-16T15:00:00Z",
+                    "end": "2025-10-16T15:45:00Z",
+                },
+                {
+                    "type": "Flight",
+                    "summary": "KL1608 FCO to AMS",
+                    "start": "2025-10-16T17:45:00Z",
+                    "end": "2025-10-16T20:05:00Z",
+                },
+            ),
+            id="rail-then-flight",
+        ),
+        pytest.param(
+            (
+                {
+                    "type": "Flight",
+                    "summary": "AF1005 FCO to CDG",
+                    "start": "2025-10-16T14:00:00Z",
+                    "end": "2025-10-16T16:10:00Z",
+                },
+                {
+                    "type": "Flight",
+                    "summary": "AF1340 CDG to AMS",
+                    "start": "2025-10-16T18:45:00Z",
+                    "end": "2025-10-16T20:05:00Z",
+                },
+            ),
+            id="connecting-flights",
+        ),
+    ],
+)
+def test_the_new_lodging_waits_for_the_journeys_final_arrival(legs):
+    """#331 review: between legs the operator has not reached the new city, so
+    the previous lodging stays the anchor until the last leg lands."""
+    schedule = _with_transports(*legs)
+
+    between_legs = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T17:00:00+00:00"), home_address="home"
+    )
+    landed = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T21:00:00+00:00"), home_address="home"
+    )
+
+    assert between_legs.address == "Via de' Ciancaleoni 49, Rome"
+    assert landed.address == "Schiphol Boulevard 701, Schiphol"
+
+
+def test_a_staging_night_before_an_outbound_flight_keeps_its_check_in():
+    """#331 review: after another lodging, an airport-hotel night followed by a
+    morning flight out is outbound from that hotel, not the journey into it."""
+    schedule = [
+        {"type": "Trip", "summary": "Swing", "start": "2025-10-14", "end": "2025-10-20"},
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Dharma Boutique Hotel",
+            "start": "2025-10-14T12:00:00Z",
+            "location": "Via de' Ciancaleoni 49, Rome",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-out: Dharma Boutique Hotel",
+            "start": "2025-10-15T09:00:00Z",
+            "location": "Via de' Ciancaleoni 49, Rome",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Hilton Rome Airport",
+            "start": "2025-10-15T22:00:00Z",
+            "location": "Via Arturo Ferrarin 2, Fiumicino",
+        },
+        {
+            "type": "Flight",
+            "summary": "AZ608 FCO to JFK",
+            "start": "2025-10-16T07:00:00Z",
+            "end": "2025-10-16T09:00:00Z",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-out: Hilton Rome Airport",
+            "start": "2025-10-16T11:00:00Z",
+            "location": "Via Arturo Ferrarin 2, Fiumicino",
+        },
+    ]
+
+    anchor = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T05:00:00+00:00"), home_address="home"
+    )
+
+    assert anchor.address == "Via Arturo Ferrarin 2, Fiumicino"

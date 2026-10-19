@@ -314,11 +314,15 @@ def _trip_begins_at(
     return min(candidates) if candidates else None
 
 
-# How long after a nominal check-in a transport departure still marks the
-# operator as en route to that lodging. TripIt's nominal check-in routinely
-# precedes the real arrival on a city-to-city hotel-change day (#323); a
-# flight days later is a mid-stay trip, not the inbound one.
+# How long after checking out of another lodging a departure still counts as
+# the journey to the next one. TripIt's nominal check-in routinely precedes the
+# real arrival on a city-to-city hotel-change day (#323); a departure after a
+# night at the new lodging is outbound from it, not inbound.
 _INBOUND_WINDOW = timedelta(hours=12)
+
+# Longest gap between one leg's arrival and the next leg's departure that still
+# continues the same journey (a train to the airport, a connecting flight).
+_CONNECTION_WINDOW = timedelta(hours=4)
 
 
 def _effective_check_in(
@@ -330,51 +334,62 @@ def _effective_check_in(
 ) -> datetime:
     """When the operator can actually be at a checked-in lodging.
 
-    Only on a hotel change: when the operator was at another lodging earlier
-    in the trip, a transport that departs after the nominal check-in, before
-    that lodging's check-out and within _INBOUND_WINDOW is the one bringing
-    them there, so the check-in takes effect at its arrival. A first lodging
-    reached from home (an airport hotel the night before a flight, #235) and
-    the morning flight after an airport-hotel night (check-out bound) keep
-    their nominal check-in. Prior lodgings and transports count only inside
-    the active trip's span, so an earlier trip's hotel is not a hotel change.
+    Only on a hotel change: the journey's first leg departs after the nominal
+    check-in, before this lodging's check-out, and within _INBOUND_WINDOW of
+    checking out of another lodging. Legs departing within _CONNECTION_WINDOW
+    of the previous arrival continue the journey, and the check-in takes effect
+    at its final arrival. A first lodging reached from home (#235) and a
+    staging night before an outbound departure keep their nominal check-in.
+    Lodgings and transports count only inside the active trip's span, so an
+    earlier trip's hotel is not a hotel change.
     """
     name = hotel_name(record.get("summary"))
-    came_from_lodging = any(
-        other.get("type") == "Lodging"
-        and hotel_name(other.get("summary")) not in (None, name)
-        and (when := _timed_within(other, trip_start, trip_end)) is not None
-        and when < nominal
-        for other in schedule
-    )
-    if not came_from_lodging:
-        return nominal
     checkout = None
+    left_lodging: list[datetime] = []
     for other in schedule:
         if other.get("type") != "Lodging" or lodging_role(other.get("summary")) != CHECK_OUT:
             continue
-        if hotel_name(other.get("summary")) != name:
-            continue
-        when = parse_schedule_time(other.get("start"))
-        if when is not None and when > nominal and (checkout is None or when < checkout):
-            checkout = when
-    limit = nominal + _INBOUND_WINDOW
-    if checkout is not None and checkout < limit:
-        limit = checkout
-    inbound = None
-    inbound_departure = None
+        other_name = hotel_name(other.get("summary"))
+        if other_name == name:
+            when = parse_schedule_time(other.get("start"))
+            if when is not None and when > nominal and (checkout is None or when < checkout):
+                checkout = when
+        elif other_name is not None:
+            when = _timed_within(other, trip_start, trip_end)
+            if when is not None:
+                left_lodging.append(when)
+    if not left_lodging:
+        return nominal
+    legs = []
     for transport in schedule:
         if transport.get("type") not in _DEPARTURE_TYPES:
             continue
         departs = _timed_within(transport, trip_start, trip_end)
-        if departs is None or not (nominal < departs < limit):
+        arrives = parse_schedule_time(transport.get("end"))
+        if departs is None or arrives is None or arrives <= departs:
             continue
-        if inbound_departure is None or departs < inbound_departure:
-            inbound, inbound_departure = transport, departs
-    if inbound is None:
+        if checkout is not None and departs >= checkout:
+            continue
+        legs.append((departs, arrives))
+    legs.sort()
+    first = next(
+        (
+            index
+            for index, (departs, _) in enumerate(legs)
+            if departs > nominal
+            and any(timedelta(0) <= departs - left <= _INBOUND_WINDOW for left in left_lodging)
+        ),
+        None,
+    )
+    if first is None:
         return nominal
-    arrives = parse_schedule_time(inbound.get("end"))
-    return arrives if arrives is not None and arrives > nominal else nominal
+    arrival = legs[first][1]
+    for departs, arrives in legs[first + 1 :]:
+        if departs > arrival + _CONNECTION_WINDOW:
+            break
+        if departs >= arrival:
+            arrival = arrives
+    return arrival if arrival > nominal else nominal
 
 
 def resolve_anchor(
