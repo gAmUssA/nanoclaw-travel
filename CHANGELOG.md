@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.2.150 — 2026-10-19
+
 ### flight-assist — byAir session-less mode; sustained sync failures alert (#326)
 
 On 2026-10-07 byAir's MCP server (`byair-mcp-server 3.3.1`) stopped issuing `Mcp-Session-Id` on `initialize`. MCP 2025-06-18 allows this (the server MAY assign a session). `byair_client.py` treated the missing header as fatal (`session_missing`), so every sync and poll failed for 11 days. The failures were recorded as `precheck_skipped` with `{"events":[]}`, byte-identical to a quiet healthy cycle. The outage surfaced only on a travel day, when an AC1714 delay and a DL5081 gate change produced no notifications.
