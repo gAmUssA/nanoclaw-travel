@@ -45,4 +45,11 @@ export TRIPIT_ICAL_URL="${TRIPIT_ICAL_URL:-https://www.tripit.com/feed/ical/priv
 export RECLAIM_API_TOKEN="${RECLAIM_API_TOKEN:-onecli-managed}"
 
 cd "$PKG_DIR"
-node sync.mjs sync --output=json
+# TZ=UTC pins the package to the zone its all-day date math assumes. Under
+# the container's location-following TZ, an operator east of UTC got every
+# all-day trip one day early (OOO events and Reclaim segments), flapping back
+# when a later run happened from a US zone (#325;
+# jbaruch/reclaim-tripit-timezones-sync#20). OOO events are written and read
+# back with an explicit home timeZone, so nothing else depends on the process
+# zone. Keep the pin after the upstream fix ships.
+TZ=UTC node sync.mjs sync --output=json

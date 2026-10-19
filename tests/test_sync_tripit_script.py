@@ -38,7 +38,11 @@ _STRIPPED = ("ONECLI_URL", "TRIPIT_ICAL_URL", "RECLAIM_API_TOKEN")
 
 
 def _run(
-    pkg_dir: Path, *, onecli_url: str | None, path_prepend: Path | None = None
+    pkg_dir: Path,
+    *,
+    onecli_url: str | None,
+    path_prepend: Path | None = None,
+    tz: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run the wrapper against a controlled fake package dir. `onecli_url=None`
     leaves ONECLI_URL unset to exercise the gateway guard. `path_prepend` puts a
@@ -49,6 +53,8 @@ def _run(
         env["ONECLI_URL"] = onecli_url
     if path_prepend is not None:
         env["PATH"] = f"{path_prepend}{os.pathsep}{env.get('PATH', '')}"
+    if tz is not None:
+        env["TZ"] = tz
     return subprocess.run(["bash", str(SCRIPT)], capture_output=True, text=True, env=env)
 
 
@@ -62,8 +68,8 @@ def _make_node_shim(bin_dir: Path) -> Path:
     node = bin_dir / "node"
     node.write_text(
         "#!/bin/bash\n"
-        'printf \'{"args":"%s","tripit":"%s","reclaim":"%s","segments":[]}\\n\''
-        ' "$*" "$TRIPIT_ICAL_URL" "$RECLAIM_API_TOKEN"\n'
+        'printf \'{"args":"%s","tripit":"%s","reclaim":"%s","tz":"%s","segments":[]}\\n\''
+        ' "$*" "$TRIPIT_ICAL_URL" "$RECLAIM_API_TOKEN" "${TZ-}"\n'
     )
     node.chmod(0o755)
     return bin_dir
@@ -111,3 +117,15 @@ def test_script_runs_sync_with_placeholder_defaults_when_gateway_engaged(tmp_pat
     assert data["args"] == "sync.mjs sync --output=json"  # ran the entrypoint
     assert data["tripit"].startswith("https://www.tripit.com/feed/ical/private/")
     assert data["reclaim"], "RECLAIM_API_TOKEN placeholder must be non-empty"
+
+
+def test_sync_runs_in_utc_whatever_the_container_zone(tmp_path):
+    """#325: an operator east of UTC got all-day trips one day early because
+    the package ran in the container's location-following TZ. The wrapper
+    pins the child to UTC regardless of the caller's zone."""
+    shim = _make_node_shim(tmp_path / "bin")
+    pkg = tmp_path / "pkg"
+    pkg.mkdir()
+    result = _run(pkg, onecli_url="http://gateway.test", path_prepend=shim, tz="Europe/Brussels")
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["tz"] == "UTC"
