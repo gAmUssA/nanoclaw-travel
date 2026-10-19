@@ -2,7 +2,8 @@
 name: flight-assist
 description: On a byAir precheck wake event, reconciles the operator's managed calendar events and composes a user-facing flight notification — delay, gate change, cancellation, boarding, connection risk, inbound delay, time to leave, baggage carousel, day-before check, or arrival logistics. Also configures the plugin (verify credentials, set home base). Use when a tracked-flight wake event needs a notification, or when setting up or diagnosing flight-assist — 'diagnose flight-assist', 'set flight-assist home base', 'configure flight-assist'.
 cadence: "*/2 * * * *"
-agentModel: "claude-haiku-4-5-20251001"
+# agentModel renewal: no scanner tracks this pin. Re-check it on each new Claude model release and bump it in its own PR.
+agentModel: "claude-haiku-5-5"
 script: "precheck.py"
 precheck_timeout_ms: 30000
 ---
@@ -60,7 +61,7 @@ It converges the calendar to byAir truth — creates/shifts the boarding block, 
 
 It prints single-line JSON: `{"status": "...", "planned": N, "executed": N, "archived": N, "failed": [...], "airport_drive": {...}}`. Output keys vary by `status`: `byair_calendar_id` and `archived` are present only when a cycle ran (`ok` / `no_flights`) and are omitted on `no_calendar`, so do not depend on a key that may be absent. `status: "ok"` means a cycle ran. `no_calendar` (no flight calendar resolved from config), `no_flights` (nothing tracked), or `{"status": "error", "error": "gateway"}` (the OneCLI gateway is not authenticating the requests) or `{"status": "error", "error": "tier"}` (this agent's tier is gated from Google by design) all mean reconciliation is inactive this cycle. The `airport_drive` object is now a fixed retired marker — `{"status": "retired", "engine": "drive-engine"}` — since airport drives moved to the unified drive-engine (#156); it is bookkeeping only, absent on the error exits. Treat a non-empty `failed` list (those ops retry next cycle) as expected: proceed to the notification below. Reconcile output is calendar bookkeeping, never a user-facing message — do not surface it; proceed silently regardless of its result.
 
-Then compose the notification. Each event is `{"flight_id": int, "event": {"reason": "...", ...}}`. Compose one human-readable notification per event.
+Then compose the notification. Each event is `{"flight_id": int | null, "event": {"reason": "...", ...}}`. Compose one human-readable notification per event.
 
 The full event-shape contract is in `references/event-payloads.md`; consult it when an event's `reason` is unfamiliar.
 
@@ -86,8 +87,12 @@ The reason → notification mapping for the documented events:
 | `removed_upstream` | "Flight `<code>` no longer tracked upstream — remove from active trips if intentional." Don't auto-delete; let the user confirm |
 | `tracked_flight_added` | Silent in most cases (the daily sync added a flight to the tracking index). Surface only when the user explicitly asked "what's new" or when `data.events` contains nothing else worth reporting |
 | `tracked_flight_removed` | "Flight `<code>` stopped tracking — daily sync removed it from the active-flights index." Treat as informational, not actionable |
+| `byair_unreachable` | "Flight sync with byAir is failing: `<consecutive_failures>` passes in a row, last error `<error>`. New or changed trips won't reach flight tracking until it recovers. Details are in the sync-tripit host log." Always send it |
+| `byair_recovered` | "Flight sync with byAir recovered." |
+| `sync_internal_error` | "Flight sync is failing inside NanoClaw: `<consecutive_failures>` passes in a row, last error `<error>`. The traceback is in the sync-tripit host log." Always send it |
+| `sync_internal_recovered` | "The local fault in flight sync has cleared." Claim nothing about byAir: a `byair_unreachable` in the same wake still stands |
 
-For each event, fetch the per-flight state to enrich the notification (gate, terminal, ETD, ETA) by invoking `get-flight-state.py`:
+Source-level events carry `flight_id: null` and have no per-flight state. For each event with a non-null `flight_id`, fetch the per-flight state to enrich the notification (gate, terminal, ETD, ETA) by invoking `get-flight-state.py`:
 
 ```bash
 python3 /home/node/.claude/skills/tessl__flight-assist/scripts/get-flight-state.py <flight_id>
@@ -97,6 +102,8 @@ Outputs the full state record as single-line JSON on stdout, or `{"error": "..."
 
 If multiple events share the same `flight_id` (e.g., `gate_change` + `delay` in one cycle), compose ONE notification per flight that merges them, ordered: cancel/divert first, then time-sensitive (boarding, time_to_leave), then info (gate, delay, inbound), then logistics (carousel, arrival).
 
+Source-level events (`flight_id: null`) are never merged: compose each one as its own notification, separate from flight events and from each other.
+
 After composing, route the notification through the user's main channel (the orchestrator handles routing; the skill just produces the message text).
 
-If no actionable text would result for an event (e.g., a duplicate notification you've already sent within the last 10 min), proceed silently — do not echo "no notification needed". Finish here.
+If no actionable text would result for an event (e.g., a duplicate notification you've already sent within the last 10 min), emit nothing for it: no `send_message`, no emoji, no reaction, no "no notification needed". A scheduled wake has no inbound message to react to. Never send an emoji ack from it. Finish here.

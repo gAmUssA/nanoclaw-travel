@@ -1338,6 +1338,53 @@ def test_byair_transport_error_degrades_only_that_flight(state_root: Path):
     assert read_flight_state(12345) is None
 
 
+def test_poll_failure_ids_reach_the_caller(state_root: Path):
+    """#326: a failed poll is reported through `poll_failures` so main() can
+    mark the run as failed instead of emitting a healthy-looking empty cycle."""
+    write_active_flights([12345])
+    fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=timezone.utc)
+    failed: set[int] = set()
+    with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
+        mock_byair_from_env.return_value.get_flight.side_effect = precheck.ByAirError(
+            "session_missing", "initialize response did not include mcp-session-id header"
+        )
+        events = precheck._run_cycle(now_utc=fake_now, poll_failures=failed)
+    assert events == []
+    assert failed == {12345}
+
+
+def test_main_marks_failed_polls_in_payload(state_root: Path, capsys):
+    """#326: with a failed poll the payload carries `error` + `poll_failed_ids`,
+    so it is no longer byte-identical to a quiet healthy cycle."""
+
+    def fake_cycle(*, now_utc, poll_failures):
+        poll_failures.update({222, 111})
+        return []
+
+    in_window = type("W", (), {"in_window": True, "reason": "test"})()
+    with (
+        patch("precheck.evaluate_trip_window", return_value=in_window),
+        patch("precheck._run_cycle", side_effect=fake_cycle),
+    ):
+        assert precheck.main() == 0
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload == {
+        "wake_agent": False,
+        "data": {"events": [], "error": "byair_poll_failed", "poll_failed_ids": [111, 222]},
+    }
+
+
+def test_main_healthy_quiet_cycle_has_no_error(state_root: Path, capsys):
+    in_window = type("W", (), {"in_window": True, "reason": "test"})()
+    with (
+        patch("precheck.evaluate_trip_window", return_value=in_window),
+        patch("precheck._run_cycle", return_value=[]),
+    ):
+        assert precheck.main() == 0
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload == {"wake_agent": False, "data": {"events": []}}
+
+
 def test_script_safe_shape_on_byair_misconfig(tmp_path: Path):
     """Missing BYAIR_MCP_URL — script should emit safe-shape JSON, exit 0."""
     state = tmp_path / "state" / "flight-assist"

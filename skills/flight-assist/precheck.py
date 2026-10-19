@@ -197,8 +197,16 @@ def main() -> int:
             print(f"flight-assist precheck: {window.reason}", file=sys.stderr)
             _emit({"wake_agent": False, "data": {"reason": "outside_trip_window"}})
             return 0
-        events = _run_cycle(now_utc=now_utc)
-        _emit({"wake_agent": bool(events), "data": {"events": events}})
+        poll_failed: set[int] = set()
+        events = _run_cycle(now_utc=now_utc, poll_failures=poll_failed)
+        data: dict = {"events": events}
+        if poll_failed:
+            # A failed poll must not read as a quiet, healthy cycle (#326).
+            # Alerting on a sustained outage is sync_tripit.py's job (its
+            # consecutive-failure counter); this keeps the run log honest.
+            data["error"] = "byair_poll_failed"
+            data["poll_failed_ids"] = sorted(poll_failed)
+        _emit({"wake_agent": bool(events), "data": data})
         return 0
     except Exception:  # noqa: BLE001 — outer-boundary-process-contract
         traceback.print_exc(file=sys.stderr)
@@ -216,8 +224,13 @@ def _run_cycle(
     now_utc: datetime,
     monotonic: Callable[[], float] = time.monotonic,
     operator_tz_reader: Callable[[], OperatorTz | None] = read_operator_tz,
+    poll_failures: set[int] | None = None,
 ) -> list[dict]:
     """Execute one precheck cycle, return aggregated wake events.
+
+    `poll_failures`, when given, receives the ids of flights whose byAir
+    poll was attempted this cycle and failed (non-404 byAir error or
+    transport error), so the caller can mark the run as failed (#326).
 
     `now_utc` is injected so tests can pin the clock without monkey-patching
     the `datetime` module (which breaks `fromisoformat()` deeper in the
@@ -374,6 +387,8 @@ def _run_cycle(
     # using leg-1's live, freshly-polled snapshot. So the firing decision never
     # rests on a skipped flight's unverified snapshot, and a tight connection
     # where leg-1 is imminent but leg-2 sits just past the horizon still fires.
+    if poll_failures is not None:
+        poll_failures.update(poll_failed_ids)
     excluded_ids = removed_upstream_ids | poll_failed_ids | deferred_ids
     risk_candidate_ids = [fid for fid in active_flight_ids if fid not in excluded_ids]
     aggregated_events.extend(

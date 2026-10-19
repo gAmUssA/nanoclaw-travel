@@ -1,5 +1,33 @@
 # Changelog
 
+## 0.2.150 — 2026-10-19
+
+### flight-assist — byAir session-less mode; sustained sync failures alert (#326)
+
+On 2026-10-07 byAir's MCP server (`byair-mcp-server 3.3.1`) stopped issuing `Mcp-Session-Id` on `initialize`. MCP 2025-06-18 allows this (the server MAY assign a session). `byair_client.py` treated the missing header as fatal (`session_missing`), so every sync and poll failed for 11 days. The failures were recorded as `precheck_skipped` with `{"events":[]}`, byte-identical to a quiet healthy cycle. The outage surfaced only on a travel day, when an AC1714 delay and a DL5081 gate change produced no notifications.
+
+- `ByAirClient` tracks the handshake separately from the session id. A server that issues no id runs stateless: one handshake per client, no session header, and no session-expiry retry. Session-issuing servers behave as before.
+- `sync_tripit.py` keeps two consecutive-failure runs in the new `sync-health.json` (own `schema_version: 1`, documented in `state-schema.md`). Passes that reached byAir and failed emit a source-level `byair_unreachable` event (`flight_id: null`) once the run reaches `_OUTAGE_ALERT_THRESHOLD`, and `byair_recovered` on the first clean pass after an alert. Passes that died on a local fault run their own counter with `sync_internal_error` / `sync_internal_recovered`, so a config or state bug never reads as a byAir outage. All four are composed through flight-assist's Step 3 table, and sync-tripit is now an action router that relays them. The owner reader raises `StateError` on an unusable record, and the sync reports it as `health_error` while still emitting its diff.
+- The flight-assist precheck adds `error: "byair_poll_failed"` and `poll_failed_ids` to its payload when any poll failed, so a failed cycle no longer reads as a quiet one in the run log.
+
+## 0.2.149 — 2026-10-19
+
+### flight-assist — a deduped wake emits nothing, not a bare ✈️ (#321)
+
+On 2026-09-25 a deduped `arrival_logistics` wake correctly skipped the duplicate notification, then sent a standalone `✈️` via `send_message` as a "silent success" ack. It reached the owner as a content-free `[M] ✈️` push. Step 3's no-action branch now says to emit nothing: no `send_message`, no emoji, no reaction. A scheduled wake has no inbound message to react to. The general rule is clarified in jbaruch/nanoclaw-core `rules/default-silence.md`.
+
+## 0.2.148 — 2026-10-19
+
+### nightly-travel-sync — run the TripIt → Reclaim sync in UTC (#325)
+
+`sync-tripit.sh` ran `reclaim-tripit-timezones-sync` under the container's TZ, which follows the operator's location. East of UTC, the package shifted every all-day trip one day early (jbaruch/reclaim-tripit-timezones-sync#20). The 2026-10-06 run from Europe wrote `[TripIt OOO]` events one day before each trip and missed its last day, and an OOO-gated reminder treated the return-travel day as home. The events flapped back on the next run from a US zone. The wrapper now runs `TZ=UTC node sync.mjs`. OOO events are written and read with an explicit home `timeZone`, so nothing else depends on the process zone. The pin stays after the upstream fix.
+
+## 0.2.147 — 2026-10-18
+
+### Move the four cadence skills to Haiku 5.5 (#324)
+
+`drive-engine`, `flight-assist`, `nightly-travel-sync` and `sync-tripit` now pin `agentModel: "claude-haiku-5-5"` (was `claude-haiku-4-5-20251001`). The orchestrator's agent image ships Agent SDK 0.3.293 with Claude Code 2.1.293, which knows the model and prices it (jbaruch/nanoclaw#990, verified on the NAS 2026-10-18). None of these skills calls Haiku directly with a thinking budget, which Haiku 5.5 rejects. Each pin now carries the renewal note the other fleet plugins use.
+
 ## 0.2.144 — 2026-09-23
 
 ### Trim skill descriptions that carry implementation detail (#965 sibling)

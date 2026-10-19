@@ -398,21 +398,81 @@ def test_body_read_timeout_surfaces_as_urlerror(client):
     assert isinstance(exc_info.value.__cause__, TimeoutError)
 
 
-def test_initialize_without_session_id_raises():
-    """Server response missing the mcp-session-id header is unrecoverable."""
-    client = ByAirClient(SYNTH_URL)
+def _stateless_initialize_response() -> _FakeResponse:
+    """initialize answered with a valid InitializeResult and NO mcp-session-id
+    header — the session-less Streamable HTTP mode byAir switched to (#326)."""
     body = json.dumps(
         {"jsonrpc": "2.0", "id": 1, "result": {"protocolVersion": "2025-06-18"}}
     ).encode()
-    bad_init = _FakeResponse(body, {"content-type": "application/json"})
+    return _FakeResponse(body, {"content-type": "application/json"})
+
+
+def _stateless_fake(recorder: list, tool_response=None):
+    """urlopen stand-in for a session-less server: records every request's
+    method + headers, never issues a session id."""
 
     def fake_urlopen(request, **kwargs):
-        return bad_init
+        data = json.loads(request.data)
+        recorder.append({"method": data.get("method"), "headers": dict(request.headers)})
+        if data.get("method") == "initialize":
+            return _stateless_initialize_response()
+        if data.get("method") == "notifications/initialized":
+            return _initialized_notification_ack()
+        if tool_response is not None:
+            return tool_response()
+        return _tool_response({"id": data["params"]["arguments"].get("flight_id")})
 
-    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
-        with pytest.raises(ByAirError) as exc_info:
+    return fake_urlopen
+
+
+def test_stateless_server_tool_call_succeeds_without_session_header():
+    """No mcp-session-id on initialize is stateless mode, not an error: the
+    handshake completes and tools/call returns data, with no session header
+    on any request."""
+    client = ByAirClient(SYNTH_URL)
+    recorder: list = []
+    with patch("urllib.request.urlopen", side_effect=_stateless_fake(recorder)):
+        result = client.get_flight(flight_id=7)
+
+    assert result == {"id": 7}
+    assert [r["method"] for r in recorder] == [
+        "initialize",
+        "notifications/initialized",
+        "tools/call",
+    ]
+    for r in recorder:
+        assert "Mcp-session-id" not in r["headers"]
+
+
+def test_stateless_server_handshakes_once_across_calls():
+    """A stateless server must not trigger a fresh initialize before every call."""
+    client = ByAirClient(SYNTH_URL)
+    recorder: list = []
+    with patch("urllib.request.urlopen", side_effect=_stateless_fake(recorder)):
+        assert client.get_flight(flight_id=1) == {"id": 1}
+        assert client.get_flight(flight_id=2) == {"id": 2}
+
+    methods = [r["method"] for r in recorder]
+    assert methods.count("initialize") == 1
+    assert methods.count("tools/call") == 2
+
+
+def test_stateless_server_http_400_propagates_without_reinit():
+    """With no session issued there is nothing to expire: a 400 on tools/call
+    propagates as HTTPError and no re-initialize is attempted."""
+    client = ByAirClient(SYNTH_URL)
+    recorder: list = []
+
+    def bad_request():
+        raise urllib.error.HTTPError(
+            SYNTH_URL, 400, "Bad Request", Message(), io.BytesIO(b"bad request")
+        )
+
+    with patch("urllib.request.urlopen", side_effect=_stateless_fake(recorder, bad_request)):
+        with pytest.raises(urllib.error.HTTPError):
             client.get_flight(flight_id=1)
-    assert exc_info.value.error_type == "session_missing"
+
+    assert [r["method"] for r in recorder].count("initialize") == 1
 
 
 # --- airport endpoints (real BNA-sampled fixtures) ---------------------
@@ -531,3 +591,106 @@ def test_get_airport_not_found_raises(client):
         with pytest.raises(ByAirError) as exc_info:
             client.get_airport(airport_id=999999)
     assert exc_info.value.error_type == "not_found"
+
+
+@pytest.mark.parametrize(
+    "tool_response",
+    [
+        # Text content that is not JSON.
+        lambda: _tool_response("not json at all"),
+        # A response body that is not JSON.
+        lambda: _FakeResponse(b"<html>oops</html>", {"content-type": "application/json"}),
+        # A response body that is not UTF-8.
+        lambda: _FakeResponse(b"\xff\xfe\x00garbage", {"content-type": "application/json"}),
+        # A JSON body that is not an object.
+        lambda: _FakeResponse(b"[]", {"content-type": "application/json"}),
+        # A text block with no string `text` field.
+        lambda: _FakeResponse(
+            json.dumps(
+                {"jsonrpc": "2.0", "id": 2, "result": {"content": [{"type": "text"}]}}
+            ).encode(),
+            {"content-type": "application/json"},
+        ),
+    ],
+    ids=[
+        "text-not-json",
+        "body-not-json",
+        "body-not-utf8",
+        "body-not-object",
+        "text-field-missing",
+    ],
+)
+def test_malformed_upstream_reply_is_a_byair_error(tool_response):
+    """#327 review: a reply byAir sent in the wrong shape surfaces as
+    ByAirError("malformed_response"), never a raw decode/attribute error."""
+    client = ByAirClient(SYNTH_URL)
+    recorder: list = []
+    with patch("urllib.request.urlopen", side_effect=_stateless_fake(recorder, tool_response)):
+        with pytest.raises(ByAirError) as exc_info:
+            client.get_flight(flight_id=1)
+    assert exc_info.value.error_type == "malformed_response"
+
+
+@pytest.mark.parametrize(
+    ("init_body", "error_type"),
+    [
+        (
+            {"jsonrpc": "2.0", "id": 1, "error": {"code": -32600, "message": "bad"}},
+            "handshake_failed",
+        ),
+        ({"jsonrpc": "2.0", "id": 1}, "malformed_response"),
+        ({"jsonrpc": "2.0", "id": 1, "result": {"serverInfo": {}}}, "malformed_response"),
+    ],
+    ids=["jsonrpc-error", "no-result", "no-protocol-version"],
+)
+def test_initialize_must_be_a_real_initialize_result(init_body, error_type):
+    """#327 review: an HTTP-200 initialize that is a JSON-RPC error or not an
+    InitializeResult is never mistaken for stateless mode; no tools/call follows."""
+    client = ByAirClient(SYNTH_URL)
+    methods: list = []
+
+    def fake_urlopen(request, **kwargs):
+        methods.append(json.loads(request.data).get("method"))
+        return _FakeResponse(json.dumps(init_body).encode(), {"content-type": "application/json"})
+
+    with patch("urllib.request.urlopen", side_effect=fake_urlopen):
+        with pytest.raises(ByAirError) as exc_info:
+            client.get_flight(flight_id=1)
+    assert exc_info.value.error_type == error_type
+    assert methods == ["initialize"]
+
+
+@pytest.mark.parametrize("error_type", [None, 7, ""], ids=["null", "int", "empty"])
+def test_non_string_error_type_is_malformed(error_type):
+    """#327 review: a null `_meta.error_type` must not surface as None, which
+    the sync-health counter would read as a clean pass."""
+    client = ByAirClient(SYNTH_URL)
+
+    def bad_error_type():
+        body = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "isError": True,
+                "_meta": {"error_type": error_type},
+                "content": [{"type": "text", "text": "upstream failure"}],
+            },
+        }
+        return _FakeResponse(json.dumps(body).encode(), {"content-type": "application/json"})
+
+    with patch("urllib.request.urlopen", side_effect=_stateless_fake([], bad_error_type)):
+        with pytest.raises(ByAirError) as exc_info:
+            client.get_flight(flight_id=1)
+    assert exc_info.value.error_type == "malformed_response"
+    assert "upgrade nanoclaw-travel" in exc_info.value.message
+
+
+def test_malformed_reply_message_names_the_remedy():
+    client = ByAirClient(SYNTH_URL)
+    with patch(
+        "urllib.request.urlopen", side_effect=_stateless_fake([], lambda: _tool_response("nope"))
+    ):
+        with pytest.raises(ByAirError) as exc_info:
+            client.get_flight(flight_id=1)
+    assert "BYAIR_MCP_URL" in exc_info.value.message
+    assert "upgrade nanoclaw-travel" in exc_info.value.message
