@@ -400,6 +400,21 @@ def _internal_failure_payload(capsys) -> dict:
     return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
 
 
+def test_unexpected_health_defect_still_emits_safe_shape(state_root: Path, capsys):
+    """#327 review: a defect in the health bookkeeping inside the outer
+    handler must not escape it — the scheduler reads a non-zero exit or
+    invalid stdout as a silent skip."""
+    with (
+        patch("sync_tripit.ByAirClient.from_env", side_effect=ValueError("unset")),
+        patch("sync_tripit._record_sync_health", side_effect=KeyError("count")),
+    ):
+        assert sync_tripit.main() == 0
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["wake_agent"] is False
+    assert payload["data"]["error"] == "sync_exception"
+    assert payload["data"]["health_error"] == "KeyError"
+
+
 def test_local_fault_alerts_as_internal_not_byair(state_root: Path, capsys):
     """An exception escaping the sync (e.g. BYAIR_MCP_URL unset) is a local
     fault: it runs its own counter and never reads as a byAir outage."""

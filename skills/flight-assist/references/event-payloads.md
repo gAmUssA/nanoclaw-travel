@@ -149,7 +149,7 @@ Fires once per flight at `T-arr − 15min`.
 
 Fires when byAir returns 404 for a previously-tracked flight. The agent should surface this to the user (don't auto-delete state — let the user confirm).
 
-### Sync-driven (from `sync_tripit.py`)
+### Sync-driven (from `skills/flight-assist/sync_tripit.py`)
 
 The daily sync script also emits via the same `data.events` shape so SKILL.md's composition table has a single contract.
 
@@ -179,7 +179,7 @@ Fires when a flight appeared in `byair_list_trips` that wasn't on the active-fli
 
 Fires when a previously-tracked flight is no longer in `byair_list_trips` (e.g., the trip expired or the user untracked it upstream). The sync script deletes the per-flight state file — the event payload captures the prior-state metadata BEFORE the delete so the agent's composition template has `code` to render. Reading state by `flight_id` after this event arrives returns None (state already deleted).
 
-### Source-level (from `sync_tripit.py`, #326)
+### Source-level (from `skills/flight-assist/sync_tripit.py`, #326)
 
 These concern byAir itself, so the wrapper carries `"flight_id": null`. There is no per-flight state to read for them.
 
@@ -189,7 +189,7 @@ These concern byAir itself, so the wrapper carries `"flight_id": null`. There is
 {"reason": "byair_unreachable", "consecutive_failures": 3, "error": "session_missing"}
 ```
 
-Fires once per failure run, when consecutive sync passes that reached byAir and failed hit the threshold (`_OUTAGE_ALERT_THRESHOLD` in `sync_tripit.py`). `error` is the latest byAir error type (`transport_error`, `session_missing`, …). Until the sync recovers, new or changed trips do not reach the tracking index. Polling of already-tracked flights is separate; its failures show as `error: "byair_poll_failed"` in the flight-assist precheck payload.
+Fires once per failure run, when consecutive sync passes that reached byAir and failed hit the threshold (`_OUTAGE_ALERT_THRESHOLD` in `skills/flight-assist/sync_tripit.py`). `error` is the latest byAir error type (`transport_error`, `session_missing`, …). Until the sync recovers, new or changed trips do not reach the tracking index. Polling of already-tracked flights is separate; its failures show as `error: "byair_poll_failed"` in the flight-assist precheck payload.
 
 #### `byair_recovered`
 
@@ -217,6 +217,7 @@ Fires on the first pass that produces a result after a `sync_internal_error` ale
 
 ## Composition Discipline
 
-- One event = one notification line, unless multiple events for the same `flight_id` arrive in one cycle (then merge per the ordering rule in SKILL.md Step 3).
+- One event = one notification line, unless multiple events for the same non-null `flight_id` arrive in one cycle (then merge per the ordering rule in SKILL.md Step 3).
+- Source-level events (`flight_id: null`) are never merged, with each other or with flight events: each gets its own notification line.
 - Don't fabricate fields — every field above is OPTIONAL on the event dict except `reason`. Render `<missing>` or skip the substring rather than inventing a value.
 - Times in the event payload are in the airport's local timezone (RFC 3339 with offset) — display as-is per byAir's instructions block ("Times are in local airport timezone (RFC3339 with offset, e.g. +02:00). Show the time as-is — do not convert or add timezone abbreviations").

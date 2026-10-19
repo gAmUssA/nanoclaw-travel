@@ -89,7 +89,16 @@ def main() -> int:
         diff = {"added": [], "removed": [], "error": "sync_exception"}
         # A local fault (config, state, bug) is not a byAir outage: it runs
         # its own counter and alert, and leaves the byAir counter alone (#326).
-        _attach_sync_health(diff, internal_error=type(exc).__name__)
+        try:
+            _attach_sync_health(diff, internal_error=type(exc).__name__)
+        # outer-boundary-process-contract: the same caller reads a non-zero
+        # exit or invalid stdout as "skip waking the agent", silently. A
+        # defect in the health bookkeeping is printed and reported as
+        # `health_error`; letting it escape this handler would skip
+        # `_emit_diff` and break that stdout contract.
+        except Exception as health_exc:  # noqa: BLE001 — outer-boundary-process-contract
+            traceback.print_exc(file=sys.stderr)
+            diff["health_error"] = type(health_exc).__name__
         _emit_diff(diff)
         return 0
 
