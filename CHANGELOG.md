@@ -1,5 +1,9 @@
 # Changelog
 
+### flight-assist — a deduped wake emits nothing, not a bare ✈️ (#321)
+
+On 2026-09-25 a deduped `arrival_logistics` wake correctly skipped the duplicate notification, then sent a standalone `✈️` via `send_message` as a "silent success" ack. It reached the owner as a content-free `[M] ✈️` push. Step 3's no-action branch now says to emit nothing: no `send_message`, no emoji, no reaction. A scheduled wake has no inbound message to react to. The general rule is clarified in jbaruch/nanoclaw-core `rules/default-silence.md`.
+
 ## 0.2.148 — 2026-10-19
 
 ### nightly-travel-sync — run the TripIt → Reclaim sync in UTC (#325)
