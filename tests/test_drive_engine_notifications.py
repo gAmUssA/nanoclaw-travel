@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import replace
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +32,7 @@ from reconcile import (  # noqa: E402
 )
 from reconcile_sweep import build_sweep_payload, render_notification  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _dt(h, mi=0):

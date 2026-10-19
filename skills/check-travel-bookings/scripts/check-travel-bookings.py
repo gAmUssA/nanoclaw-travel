@@ -21,7 +21,7 @@ guard in `main()`.
 import json
 import os
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 # travel-core owns the `Check-in:` / `Check-out:` discriminator. Runtime mount
@@ -158,7 +158,7 @@ def load_transport_gap_verdicts(path: Path | None = None, *, now: datetime | Non
     trips = payload.get("trips")
     if not isinstance(trips, dict):
         return {}
-    at = now if now is not None else datetime.now(timezone.utc)
+    at = now if now is not None else datetime.now(UTC)
     return {
         slug: record["verdict"]
         for slug, record in trips.items()
@@ -644,7 +644,7 @@ def main():
 
     output = {
         "gaps": gaps,
-        "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "checked_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "total_trips": len(trips),
         "complete_trips": complete_trips,
         # Home-metro placeholders, counted rather than folded into

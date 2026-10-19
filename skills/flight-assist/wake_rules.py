@@ -63,7 +63,7 @@ Thresholds (constants below):
 from __future__ import annotations
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 DELAY_THRESHOLD_MINUTES = 15
 
@@ -329,9 +329,9 @@ def _delay_delta_minutes(prev_dep_time: str | None, new_dep_time: str | None) ->
     # regardless of offset (e.g., gate change while the airport's offset
     # shifts across a DST boundary).
     if prev_dt.tzinfo is None:
-        prev_dt = prev_dt.replace(tzinfo=timezone.utc)
+        prev_dt = prev_dt.replace(tzinfo=UTC)
     if new_dt.tzinfo is None:
-        new_dt = new_dt.replace(tzinfo=timezone.utc)
+        new_dt = new_dt.replace(tzinfo=UTC)
     return int((new_dt - prev_dt).total_seconds() // 60)
 
 

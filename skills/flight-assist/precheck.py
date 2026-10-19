@@ -41,7 +41,7 @@ import time
 import traceback
 import urllib.error
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _BUNDLE_DIR = Path(__file__).resolve().parent
@@ -184,7 +184,7 @@ def main() -> int:
     # subsequent run, so the outermost catch emits a safe-shape JSON +
     # writes the traceback to stderr per error-handling.md's carve-out.
     try:
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         # Defense-in-depth trip-window gate (#147). The host pre-spawn gate
         # (jbaruch/nanoclaw#754) should already keep the container from spawning
         # off-window; if one spawns anyway, bail here — before any byAir call —
@@ -1027,7 +1027,7 @@ def _parse_iso8601(value: str | None) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 

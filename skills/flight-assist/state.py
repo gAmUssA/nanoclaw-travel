@@ -61,7 +61,7 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 STATE_SCHEMA_VERSION = 7
@@ -377,7 +377,7 @@ def read_current_location() -> dict | None:
         parsed = datetime.fromisoformat(captured.replace("Z", "+00:00"))
     except ValueError:
         return None
-    if parsed.tzinfo is None or parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
         return None
     return {"latitude": float(lat), "longitude": float(lng), "captured_at": captured}
 

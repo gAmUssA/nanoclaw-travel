@@ -41,7 +41,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 _BUNDLE_DIR = Path(__file__).resolve().parent.parent
@@ -62,7 +62,7 @@ def main() -> int:
     # failures it replaced are discovered on the first CALL and handled below.
     client = GoogleCalendarClient()
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     try:
         summary = run_reconcile(client, now=now)
     except GatewayNotInjecting as exc:

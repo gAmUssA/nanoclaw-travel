@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +41,7 @@ from reconcile_sweep import (  # noqa: E402
     make_route,
 )
 
-UTC = timezone.utc
+UTC = UTC
 HOME = "12 Example St, TN"
 NOW = datetime(2020, 7, 10, 12, 0, tzinfo=UTC)
 US = "🇺🇸"
@@ -780,24 +780,24 @@ def test_plan_lodging_legs_drops_the_local_drive_the_outbound_absorbed(tmp_path,
         identity="mtg-1",
         kind="meeting_outbound",
         summary="Drive: Opening Ceremony",
-        start=datetime(2020, 8, 14, 23, 0, tzinfo=timezone.utc),
-        end=datetime(2020, 8, 15, 0, 0, tzinfo=timezone.utc),
+        start=datetime(2020, 8, 14, 23, 0, tzinfo=UTC),
+        end=datetime(2020, 8, 15, 0, 0, tzinfo=UTC),
         origin=hotel,
         destination=stadium,
         baseline_seconds=3600,
-        anchor=datetime(2020, 8, 15, 0, 0, tzinfo=timezone.utc),
+        anchor=datetime(2020, 8, 15, 0, 0, tzinfo=UTC),
         timezone="America/New_York",
     )
     unrelated = DesiredBlock(
         identity="mtg-2",
         kind="meeting_outbound",
         summary="Drive: Dentist",
-        start=datetime(2020, 8, 3, 14, 0, tzinfo=timezone.utc),
-        end=datetime(2020, 8, 3, 14, 30, tzinfo=timezone.utc),
+        start=datetime(2020, 8, 3, 14, 0, tzinfo=UTC),
+        end=datetime(2020, 8, 3, 14, 30, tzinfo=UTC),
         origin=home,
         destination="Dentist",
         baseline_seconds=1800,
-        anchor=datetime(2020, 8, 3, 14, 30, tzinfo=timezone.utc),
+        anchor=datetime(2020, 8, 3, 14, 30, tzinfo=UTC),
     )
 
     def route(origin, destination):
@@ -807,7 +807,7 @@ def test_plan_lodging_legs_drops_the_local_drive_the_outbound_absorbed(tmp_path,
         schedule=_drive_trip_schedule(),
         home=home,
         route=route,
-        now=datetime(2020, 8, 7, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2020, 8, 7, 12, 0, tzinfo=UTC),
         meeting_blocks=[local, unrelated],
     )
 
@@ -823,18 +823,18 @@ def test_plan_lodging_legs_keeps_every_meeting_block_when_no_trip_matches(tmp_pa
         identity="mtg-9",
         kind="meeting_outbound",
         summary="Drive: Dentist",
-        start=datetime(2020, 8, 3, 14, 0, tzinfo=timezone.utc),
-        end=datetime(2020, 8, 3, 14, 30, tzinfo=timezone.utc),
+        start=datetime(2020, 8, 3, 14, 0, tzinfo=UTC),
+        end=datetime(2020, 8, 3, 14, 30, tzinfo=UTC),
         origin="home",
         destination="Dentist",
         baseline_seconds=1800,
-        anchor=datetime(2020, 8, 3, 14, 30, tzinfo=timezone.utc),
+        anchor=datetime(2020, 8, 3, 14, 30, tzinfo=UTC),
     )
     blocks, skipped, questions, kept = reconcile_sweep._plan_lodging_legs(
         schedule=[],
         home="home",
         route=lambda origin, destination: timedelta(hours=1),
-        now=datetime(2020, 8, 7, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2020, 8, 7, 12, 0, tzinfo=UTC),
         meeting_blocks=[block],
     )
     assert kept == [block]
@@ -854,14 +854,14 @@ def test_trip_presence_marks_the_first_and_last_event_of_each_trip():
         key = "t1"
         address = "611 Historic Nature Trail"
         check_out = None
-        span_start = datetime(2020, 8, 14, tzinfo=timezone.utc)
-        span_end = datetime(2020, 8, 16, tzinfo=timezone.utc)
+        span_start = datetime(2020, 8, 14, tzinfo=UTC)
+        span_end = datetime(2020, 8, 16, tzinfo=UTC)
 
     meetings = [
-        _M("late", datetime(2020, 8, 15, 22, tzinfo=timezone.utc)),
-        _M("early", datetime(2020, 8, 14, 20, tzinfo=timezone.utc)),
-        _M("middle", datetime(2020, 8, 15, 2, tzinfo=timezone.utc)),
-        _M("offtrip", datetime(2020, 8, 30, 12, tzinfo=timezone.utc)),
+        _M("late", datetime(2020, 8, 15, 22, tzinfo=UTC)),
+        _M("early", datetime(2020, 8, 14, 20, tzinfo=UTC)),
+        _M("middle", datetime(2020, 8, 15, 2, tzinfo=UTC)),
+        _M("offtrip", datetime(2020, 8, 30, 12, tzinfo=UTC)),
     ]
     presence = reconcile_sweep._trip_presence(
         [_T()], meetings, route=lambda o, d: timedelta(minutes=15)
@@ -885,8 +885,8 @@ class _PresenceTrip:
         self.key = key
         self.address = address
         self.check_out = None
-        self.span_start = datetime(2020, 8, start_day, tzinfo=timezone.utc)
-        self.span_end = datetime(2020, 8, end_day, tzinfo=timezone.utc)
+        self.span_start = datetime(2020, 8, start_day, tzinfo=UTC)
+        self.span_end = datetime(2020, 8, end_day, tzinfo=UTC)
 
 
 class _PresenceMeeting:
@@ -904,7 +904,7 @@ def test_overlapping_trips_give_the_meeting_to_the_nearer_lodging():
     """Both trips reach it; iteration order must not decide which claims it."""
     near = _PresenceTrip("near", "Near Hotel")
     far = _PresenceTrip("far", "Far Hotel")
-    meeting = _PresenceMeeting("m", datetime(2020, 8, 15, 18, tzinfo=timezone.utc))
+    meeting = _PresenceMeeting("m", datetime(2020, 8, 15, 18, tzinfo=UTC))
     route = _distance_route(
         {"Near Hotel": timedelta(minutes=10), "Far Hotel": timedelta(minutes=90)}
     )
@@ -920,7 +920,7 @@ def test_an_exact_tie_between_overlapping_trips_claims_nothing():
     away-suppression exemption, so an unresolvable claim withholds it."""
     a = _PresenceTrip("a", "Hotel A")
     b = _PresenceTrip("b", "Hotel B")
-    meeting = _PresenceMeeting("m", datetime(2020, 8, 15, 18, tzinfo=timezone.utc))
+    meeting = _PresenceMeeting("m", datetime(2020, 8, 15, 18, tzinfo=UTC))
     route = _distance_route({"Hotel A": timedelta(minutes=20), "Hotel B": timedelta(minutes=20)})
 
     assert reconcile_sweep._trip_presence([a, b], [meeting], route=route) == {}
@@ -932,12 +932,12 @@ def test_overlapping_trips_keep_their_own_first_and_last_flags():
     over everything that fell on its dates."""
     near = _PresenceTrip("near", "Near Hotel")
     far = _PresenceTrip("far", "Far Hotel")
-    shared = _PresenceMeeting("shared", datetime(2020, 8, 15, 18, tzinfo=timezone.utc))
+    shared = _PresenceMeeting("shared", datetime(2020, 8, 15, 18, tzinfo=UTC))
     near_only = _PresenceMeeting(
-        "near-only", datetime(2020, 8, 14, 9, tzinfo=timezone.utc), location="Near Venue"
+        "near-only", datetime(2020, 8, 14, 9, tzinfo=UTC), location="Near Venue"
     )
     far_only = _PresenceMeeting(
-        "far-only", datetime(2020, 8, 16, 9, tzinfo=timezone.utc), location="Far Venue"
+        "far-only", datetime(2020, 8, 16, 9, tzinfo=UTC), location="Far Venue"
     )
 
     def route(origin, destination):

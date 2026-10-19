@@ -30,7 +30,7 @@ import json
 import sys
 import traceback
 import urllib.error
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 _BUNDLE_DIR = Path(__file__).resolve().parent
@@ -75,7 +75,7 @@ _OUTAGE_ALERT_THRESHOLD = 3
 
 def main() -> int:
     try:
-        diff = _run_sync(now_utc=datetime.now(timezone.utc))
+        diff = _run_sync(now_utc=datetime.now(UTC))
         _attach_sync_health(diff, internal_error=None)
         _emit_diff(diff)
         _commit_sync_health(diff)

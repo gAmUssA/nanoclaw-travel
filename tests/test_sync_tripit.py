@@ -6,7 +6,7 @@ import json
 import subprocess
 import sys
 import urllib.error
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -67,7 +67,7 @@ def _flight(flight_id: int, code: str = "XX123") -> dict:
 
 def test_first_sync_adds_all_upstream_flights(state_root: Path):
     payload = _trips_payload([_flight(100), _flight(200)])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
         diff = sync_tripit._run_sync(now_utc=fake_now)
@@ -83,7 +83,7 @@ def test_sync_fetches_only_owned_trips(state_root: Path):
     flights never enter the active-flights index and never surface as
     [M] wake events. byAir's list_trips default is "all"."""
     payload = _trips_payload([_flight(100)])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
         sync_tripit._run_sync(now_utc=fake_now)
@@ -106,7 +106,7 @@ def test_sync_bounds_the_byair_client_below_the_precheck_budget(state_root: Path
     pass if the `timeout=` argument is dropped here.
     """
     payload = _trips_payload([_flight(100)])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
         sync_tripit._run_sync(now_utc=fake_now)
@@ -116,12 +116,12 @@ def test_sync_bounds_the_byair_client_below_the_precheck_budget(state_root: Path
 def test_sync_with_unchanged_upstream_no_diff(state_root: Path):
     write_active_flights([100])
     sync_tripit.initialize_flight_from_byair(
-        flight=_flight(100), now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+        flight=_flight(100), now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     )
     payload = _trips_payload([_flight(100)])
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
-        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=timezone.utc))
+        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=UTC))
     assert diff["added"] == []
     assert diff["removed"] == []
 
@@ -135,7 +135,7 @@ def test_sync_repairs_poisoned_marketing_code_on_retained_flight(state_root: Pat
     write_active_flights([100])
     sync_tripit.initialize_flight_from_byair(
         flight=_flight(100, code="9E4908"),
-        now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc),
+        now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC),
     )
     poisoned = must(read_flight_state(100))
     poisoned["last_snapshot"] = {"code": "9E4908", "computed_status": "scheduled"}
@@ -144,7 +144,7 @@ def test_sync_repairs_poisoned_marketing_code_on_retained_flight(state_root: Pat
     payload = _trips_payload([_flight(100, code="DL4908")])
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
-        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=timezone.utc))
+        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=UTC))
 
     assert [e["flight_id"] for e in diff["repaired"]] == [100]
     healed = must(read_flight_state(100))
@@ -158,12 +158,12 @@ def test_sync_does_not_repair_when_code_already_marketing(state_root: Path):
     write_active_flights([100])
     sync_tripit.initialize_flight_from_byair(
         flight=_flight(100, code="DL4908"),
-        now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc),
+        now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC),
     )
     payload = _trips_payload([_flight(100, code="DL4908")])
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
-        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=timezone.utc))
+        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=UTC))
 
     assert diff["repaired"] == []
     assert must(read_flight_state(100))["code"] == "DL4908"
@@ -172,7 +172,7 @@ def test_sync_does_not_repair_when_code_already_marketing(state_root: Path):
 def test_sync_removes_expired_flights(state_root: Path):
     # Initial state: tracking 100 and 200
     write_active_flights([100, 200])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(100), now_utc=fake_now)
     sync_tripit.initialize_flight_from_byair(flight=_flight(200), now_utc=fake_now)
     # Upstream now only reports 100
@@ -208,7 +208,7 @@ def test_sync_retains_removed_flight_with_calendar_ledger_as_tombstone(state_roo
     reconcile sweep needs the ledger to delete those events. It still leaves
     active-flights and still surfaces in the removed-event payload."""
     write_active_flights([100, 200])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(100), now_utc=fake_now)
     sync_tripit.initialize_flight_from_byair(flight=_flight(200), now_utc=fake_now)
     # Flight 200 has carried a calendar ledger forward.
@@ -234,7 +234,7 @@ def test_sync_deletes_removed_flight_without_ledger(state_root: Path):
     ledger. A removed flight with nothing to tear down is deleted immediately,
     preserving the prior behavior."""
     write_active_flights([100, 200])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(100), now_utc=fake_now)
     sync_tripit.initialize_flight_from_byair(flight=_flight(200), now_utc=fake_now)
 
@@ -248,7 +248,7 @@ def test_sync_deletes_removed_flight_without_ledger(state_root: Path):
 
 def test_sync_adds_and_removes_in_one_pass(state_root: Path):
     write_active_flights([100])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(100), now_utc=fake_now)
     payload = _trips_payload([_flight(200), _flight(300)])
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
@@ -261,7 +261,7 @@ def test_sync_adds_and_removes_in_one_pass(state_root: Path):
 
 def test_sync_handles_empty_upstream(state_root: Path):
     write_active_flights([100, 200])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(100), now_utc=fake_now)
     sync_tripit.initialize_flight_from_byair(flight=_flight(200), now_utc=fake_now)
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
@@ -273,7 +273,7 @@ def test_sync_handles_empty_upstream(state_root: Path):
 
 def test_initialize_flight_with_flight_id_key(state_root: Path):
     """initialize_flight_from_byair tolerates `flight_id` instead of `id`."""
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     flight = {
         "flight_id": 42,  # precheck's internal key, not byair's `id`
         "code": "XX42",
@@ -292,7 +292,7 @@ def test_initialize_flight_with_flight_id_key(state_root: Path):
 
 def test_initialize_flight_with_id_key(state_root: Path):
     """initialize_flight_from_byair also tolerates `id` (byair raw shape)."""
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(42), now_utc=fake_now)
     state = read_flight_state(42)
     assert state is not None
@@ -301,14 +301,14 @@ def test_initialize_flight_with_id_key(state_root: Path):
 
 def test_initialize_flight_with_no_id_is_a_no_op(state_root: Path):
     """A flight dict without either id or flight_id silently no-ops."""
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight={"code": "XX"}, now_utc=fake_now)
     assert read_active_flights() == []  # nothing written
 
 
 def test_sync_handles_multi_trip_payload(state_root: Path):
     """Each trip's flights all roll into the same active-flights index."""
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     payload = {
         "trips": [
             {"id": 1, "name": "T1", "flights": [_flight(100)]},

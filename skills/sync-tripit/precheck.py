@@ -43,7 +43,7 @@ import os
 import subprocess
 import sys
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import ModuleType
 
@@ -193,7 +193,7 @@ def _stale_state_check(state_module: ModuleType, *, now: datetime) -> tuple[bool
     active_path = state_module.state_dir() / state_module.ACTIVE_FLIGHTS_FILE
     if not active_path.exists():
         return True, "cold_start_no_state_file"
-    mtime = datetime.fromtimestamp(active_path.stat().st_mtime, tz=timezone.utc)
+    mtime = datetime.fromtimestamp(active_path.stat().st_mtime, tz=UTC)
     age = now - mtime
     if age > _STALE_STATE_THRESHOLD:
         return True, f"stale_state_age_{int(age.total_seconds() // 60)}min"
@@ -215,7 +215,7 @@ def main() -> int:
     # error-handling. This is the sole catch-all in the file.
     try:
         state_module, sync_tripit_path = _load_flight_assist()
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         should_sync, reason = _should_sync_now(state_module, now=now)
 
         if not should_sync:

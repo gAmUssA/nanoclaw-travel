@@ -32,7 +32,7 @@ normalization (byAir record + `get_airport` lookups → `Flight`; TripIt segment
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 # Default identity tolerance on the scheduled-departure instant. Absorbs TZ /
 # midnight-boundary skew and genuine byAir-vs-TripIt disagreement on the scheduled
@@ -60,7 +60,7 @@ def _as_utc(when: datetime, *, field_name: str) -> datetime:
             f"{field_name} must be timezone-aware (carry its source UTC offset); "
             f"got naive {when!r} — resolve the offset before building a Flight"
         )
-    return when.astimezone(timezone.utc)
+    return when.astimezone(UTC)
 
 
 @dataclass(frozen=True)

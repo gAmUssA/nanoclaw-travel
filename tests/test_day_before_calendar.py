@@ -20,7 +20,7 @@ import importlib.util
 import json
 import sys
 import urllib.error
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -45,7 +45,7 @@ from operator_tz import OperatorTz  # noqa: E402
 from state import StateError  # noqa: E402
 
 CHICAGO = "America/Chicago"
-UTC = timezone.utc
+UTC = UTC
 
 # DL1144 MSP→BNA from #300: dep 19:50 CDT, arr 21:47 CDT on 2026-09-10.
 _STATE = {

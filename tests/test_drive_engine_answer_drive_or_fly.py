@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -30,7 +30,7 @@ from drive_decision import (  # noqa: E402
     load_verdicts,
 )
 
-UTC = timezone.utc
+UTC = UTC
 NOW = datetime(2020, 8, 7, 12, 0, tzinfo=UTC)
 CHECK_IN = datetime(2020, 8, 14, 20, 0, tzinfo=UTC)
 CHECK_OUT = datetime(2020, 8, 15, 15, 0, tzinfo=UTC)

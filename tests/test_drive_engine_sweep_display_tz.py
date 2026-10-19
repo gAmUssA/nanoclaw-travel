@@ -16,7 +16,7 @@ the day the suite runs.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone, tzinfo
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Self
@@ -44,7 +44,7 @@ class _FrozenDatetime(datetime):
 
     @classmethod
     def now(cls, tz: tzinfo | None = None) -> Self:
-        frozen = cls(2026, 9, 11, 13, 0, tzinfo=timezone.utc)
+        frozen = cls(2026, 9, 11, 13, 0, tzinfo=UTC)
         return frozen if tz is None else frozen.astimezone(tz)
 
 
@@ -120,7 +120,7 @@ def test_sweep_passes_the_operator_zone_to_the_meeting_planner(monkeypatch, tmp_
     assert reconcile_sweep._run_sweep() == {"wake_agent": False}
     assert captured["display_tz"] == "America/Chicago"
     # The frozen clock is the one the sweep used for its calendar window.
-    assert captured["window_start"] == datetime(2026, 9, 11, 13, 0, tzinfo=timezone.utc)
+    assert captured["window_start"] == datetime(2026, 9, 11, 13, 0, tzinfo=UTC)
 
 
 def test_sweep_passes_none_when_the_reader_has_no_zone(monkeypatch, tmp_path):
@@ -189,7 +189,7 @@ def test_home_metro_placeholder_routes_meeting_from_current_home(monkeypatch, tm
     assert outbound.origin == "12 Example St"
     assert outbound.destination == "42 Example Ave"
     assert outbound.baseline_seconds == 2400
-    assert outbound.start == datetime(2026, 9, 11, 17, 20, tzinfo=timezone.utc)
+    assert outbound.start == datetime(2026, 9, 11, 17, 20, tzinfo=UTC)
     assert returning.origin == "42 Example Ave"
     assert returning.destination == "12 Example St"
-    assert returning.end == datetime(2026, 9, 11, 19, 40, tzinfo=timezone.utc)
+    assert returning.end == datetime(2026, 9, 11, 19, 40, tzinfo=UTC)

@@ -8,7 +8,7 @@ the create args, simulate the fetched event, parse it back, assert equality.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -112,7 +112,7 @@ def test_build_block_args_wall_clock_expressed_in_airport_timezone():
     the offset and re-read the wall-clock in `timezone`, so a UTC leg_start
     with a Chicago airport tz landed the block 5h late. Calendar honours the
     offset, so the conversion now only keeps the two fields consistent."""
-    leave_by_utc = LEAVE_BY.astimezone(timezone.utc)
+    leave_by_utc = LEAVE_BY.astimezone(UTC)
     args = build_block_args(
         calendar_id="primary",
         flight_id="12345",

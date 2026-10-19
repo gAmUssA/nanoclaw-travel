@@ -36,7 +36,7 @@ import sys
 import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -316,7 +316,7 @@ def _fresh_live_origin(now: datetime, max_age_minutes: int) -> str | None:
         return None
     if when.tzinfo is None:
         return None
-    age = (now - when.astimezone(timezone.utc)).total_seconds() / 60
+    age = (now - when.astimezone(UTC)).total_seconds() / 60
     if age < 0 or age > max_age_minutes:
         return None
     lat, lng = loc.get("latitude"), loc.get("longitude")
@@ -720,7 +720,7 @@ def _latest_itinerary_instant(records: list[dict], tripit_flights: list) -> date
     for flight in tripit_flights:
         inst = getattr(flight, "scheduled_arr", None) or getattr(flight, "scheduled_dep", None)
         if isinstance(inst, datetime):
-            instants.append(inst.astimezone(timezone.utc))
+            instants.append(inst.astimezone(UTC))
     for record in records:
         raw = record.get("scheduled_arr_time") or record.get("scheduled_dep_time")
         if not isinstance(raw, str) or not raw:
@@ -731,7 +731,7 @@ def _latest_itinerary_instant(records: list[dict], tripit_flights: list) -> date
             continue
         if inst.tzinfo is None:
             continue
-        instants.append(inst.astimezone(timezone.utc))
+        instants.append(inst.astimezone(UTC))
     return max(instants) if instants else None
 
 
@@ -903,7 +903,7 @@ def _run_sweep() -> dict:
         resolve_anchor,
     )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     config = read_config() or {}
     # Home resolution (#162): the flight-assist config may have no home_address
     # key (a fresh cutover never provisioned it), so fall back to the canonical

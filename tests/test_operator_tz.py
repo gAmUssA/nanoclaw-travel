@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone, tzinfo
+from datetime import UTC, datetime, timedelta, timezone, tzinfo
 from pathlib import Path
 
 import pytest
@@ -160,7 +160,7 @@ def test_store_unreadable_exit_1_is_none(reader, capsys):
 
 def test_cli_misuse_exit_2_is_none_with_a_diagnostic(reader, capsys):
     run = FakeRun(returncode=2, stdout="", stderr="usage: read-current-tz.py [--now NOW]\n")
-    at = datetime(2026, 9, 10, 19, 50, tzinfo=timezone.utc)
+    at = datetime(2026, 9, 10, 19, 50, tzinfo=UTC)
     assert read_operator_tz(now=at, reader=reader, run=run) is None
     err = capsys.readouterr().err
     assert "exited 2" in err

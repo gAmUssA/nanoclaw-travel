@@ -41,7 +41,7 @@ stdlib-only (`datetime`) per `coding-policy: dependency-management`.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 # Event-kind tags. Carried in `extendedProperties.private` (#193 writer flip);
 # the reconcile write helpers stamp them there and `normalize_event` decodes them
@@ -104,7 +104,7 @@ def _to_instant(value: str, *, field: str) -> datetime:
         raise PlanError(f"{field} is not an RFC 3339 datetime: {value!r}") from exc
     if parsed.tzinfo is None:
         raise PlanError(f"{field} is missing a UTC offset: {value!r}")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _signature(start: str, end: str) -> str:

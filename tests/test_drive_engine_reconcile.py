@@ -10,7 +10,7 @@ converted (create + delete legacy), including both halves of a dual-id codeshare
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +24,7 @@ from reconcile import (  # noqa: E402
     plan_reconcile,
 )
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _dt(h, mi=0):

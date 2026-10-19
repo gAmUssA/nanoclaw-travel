@@ -8,7 +8,7 @@ including the no-op case.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +25,7 @@ from reconcile import (  # noqa: E402
 )
 from shadow import plan_counts, render_plan  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _desired(identity, kind="airport_departure"):

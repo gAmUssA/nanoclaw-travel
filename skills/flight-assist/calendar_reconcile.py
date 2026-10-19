@@ -51,7 +51,7 @@ stdlib-only (`datetime`) per `coding-policy: dependency-management`.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from boarding_lead import resolve_boarding_lead_minutes
 from calendar_normalize import NormalizeError, normalize_event
@@ -344,7 +344,7 @@ def build_planner_flight(state: dict, *, in_active_flights: bool, now: datetime)
 
 
 def _parse_instant(value: str) -> datetime:
-    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(UTC)
 
 
 def _fetch_window(flights: list[dict]) -> tuple[str, str]:
@@ -365,7 +365,7 @@ def _fetch_window(flights: list[dict]) -> tuple[str, str]:
 
 
 def _to_rfc3339(instant: datetime) -> str:
-    return instant.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return instant.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _is_timed(event: dict) -> bool:
