@@ -1208,3 +1208,20 @@ def test_a_staging_night_before_an_outbound_flight_keeps_its_check_in():
     )
 
     assert anchor.address == "Via Arturo Ferrarin 2, Fiumicino"
+
+
+def test_a_next_morning_departure_does_not_extend_the_inbound_journey():
+    schedule = _rome_to_amsterdam_schedule() + [
+        {
+            "type": "Flight",
+            "summary": "KL1981 AMS to BSL",
+            "start": "2025-10-17T06:00:00Z",
+            "end": "2025-10-17T07:20:00Z",
+        }
+    ]
+
+    anchor = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T21:00:00+00:00"), home_address="home"
+    )
+
+    assert anchor.address == "Schiphol Boulevard 701, Schiphol"
