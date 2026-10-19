@@ -1248,3 +1248,51 @@ def test_a_leg_spanning_the_nominal_check_in_still_defers_it():
 
     assert in_transit.address == "Via de' Ciancaleoni 49, Rome"
     assert landed.address == "Schiphol Boulevard 701, Schiphol"
+
+
+def test_a_flight_leaving_before_the_previous_checkout_is_still_inbound():
+    """#331 review: departing 09:00 against an 11:00 nominal check-out and landing
+    at 17:00 after a 15:00 nominal check-in keeps the operator in transit."""
+    schedule = [
+        {"type": "Trip", "summary": "Fall Break", "start": "2025-10-14", "end": "2025-10-20"},
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Dharma Boutique Hotel",
+            "start": "2025-10-15T12:00:00Z",
+            "location": "Via de' Ciancaleoni 49, Rome",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-out: Dharma Boutique Hotel",
+            "start": "2025-10-16T11:00:00Z",
+            "location": "Via de' Ciancaleoni 49, Rome",
+        },
+        {
+            "type": "Flight",
+            "summary": "AZ110 FCO to AMS via LHR",
+            "start": "2025-10-16T09:00:00Z",
+            "end": "2025-10-16T17:00:00Z",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-in: Hilton Amsterdam Airport Schiphol",
+            "start": "2025-10-16T15:00:00Z",
+            "location": "Schiphol Boulevard 701, Schiphol",
+        },
+        {
+            "type": "Lodging",
+            "summary": "Check-out: Hilton Amsterdam Airport Schiphol",
+            "start": "2025-10-17T08:00:00Z",
+            "location": "Schiphol Boulevard 701, Schiphol",
+        },
+    ]
+
+    airborne = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T16:00:00+00:00"), home_address="home"
+    )
+    landed = resolve_anchor(
+        schedule, at=datetime.fromisoformat("2025-10-16T18:00:00+00:00"), home_address="home"
+    )
+
+    assert airborne.address == "Via de' Ciancaleoni 49, Rome"
+    assert landed.address == "Schiphol Boulevard 701, Schiphol"

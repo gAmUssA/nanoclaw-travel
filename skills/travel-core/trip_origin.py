@@ -314,10 +314,11 @@ def _trip_begins_at(
     return min(candidates) if candidates else None
 
 
-# How long after checking out of another lodging a departure still counts as
-# the journey to the next one. TripIt's nominal check-in routinely precedes the
-# real arrival on a city-to-city hotel-change day (#323); a departure after a
-# night at the new lodging is outbound from it, not inbound.
+# How far from checking out of another lodging, before or after its nominal
+# check-out, a departure still counts as the journey to the next one. TripIt's
+# nominal check-in routinely precedes the real arrival on a city-to-city
+# hotel-change day (#323); a departure after a night at the new lodging is
+# outbound from it, not inbound.
 _INBOUND_WINDOW = timedelta(hours=12)
 
 # Longest gap between one leg's arrival and the next leg's departure that still
@@ -336,10 +337,11 @@ def _effective_check_in(
 
     Only on a hotel change: the journey's first leg arrives after the nominal
     check-in, departs before this lodging's check-out and within
-    _INBOUND_WINDOW of checking out of another lodging. Legs departing within _CONNECTION_WINDOW
-    of the previous arrival continue the journey, and the check-in takes effect
-    at its final arrival. A first lodging reached from home (#235) and a
-    staging night before an outbound departure keep their nominal check-in.
+    _INBOUND_WINDOW of another lodging's nominal check-out, on either side.
+    Legs departing within _CONNECTION_WINDOW of the previous arrival continue
+    the journey, and the check-in takes effect at its final arrival. A first
+    lodging reached from home (#235) and a staging night before an outbound
+    departure keep their nominal check-in.
     Lodgings and transports count only inside the active trip's span, so an
     earlier trip's hotel is not a hotel change.
     """
@@ -377,7 +379,7 @@ def _effective_check_in(
             index
             for index, (departs, arrives) in enumerate(legs)
             if arrives > nominal
-            and any(timedelta(0) <= departs - left <= _INBOUND_WINDOW for left in left_lodging)
+            and any(abs(departs - left) <= _INBOUND_WINDOW for left in left_lodging)
         ),
         None,
     )
