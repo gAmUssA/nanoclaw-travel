@@ -1006,35 +1006,35 @@ def _rome_to_amsterdam_schedule() -> list[dict]:
     """The live 'Fall Break + BaselOne' shape: Rome hotel until KL1608 flies
     FCO→AMS, but the Schiphol hotel's nominal check-in comes first."""
     return [
-        {"type": "Trip", "summary": "Fall Break", "start": "2026-10-14", "end": "2026-10-20"},
+        {"type": "Trip", "summary": "Fall Break", "start": "2025-10-14", "end": "2025-10-20"},
         {
             "type": "Lodging",
             "summary": "Check-in: Dharma Boutique Hotel",
-            "start": "2026-10-15T12:00:00Z",
+            "start": "2025-10-15T12:00:00Z",
             "location": "Via de' Ciancaleoni 49, Rome",
         },
         {
             "type": "Lodging",
             "summary": "Check-out: Dharma Boutique Hotel",
-            "start": "2026-10-16T09:00:00Z",
+            "start": "2025-10-16T09:00:00Z",
             "location": "Via de' Ciancaleoni 49, Rome",
         },
         {
             "type": "Lodging",
             "summary": "Check-in: Hilton Amsterdam Airport Schiphol",
-            "start": "2026-10-16T13:00:00Z",
+            "start": "2025-10-16T13:00:00Z",
             "location": "Schiphol Boulevard 701, Schiphol",
         },
         {
             "type": "Flight",
             "summary": "KL1608 FCO to AMS",
-            "start": "2026-10-16T17:45:00Z",
-            "end": "2026-10-16T20:05:00Z",
+            "start": "2025-10-16T17:45:00Z",
+            "end": "2025-10-16T20:05:00Z",
         },
         {
             "type": "Lodging",
             "summary": "Check-out: Hilton Amsterdam Airport Schiphol",
-            "start": "2026-10-17T08:00:00Z",
+            "start": "2025-10-17T08:00:00Z",
             "location": "Schiphol Boulevard 701, Schiphol",
         },
     ]
@@ -1045,7 +1045,7 @@ def test_the_airport_departure_origin_is_the_city_the_operator_is_still_in():
     only reaches on that flight."""
     anchor = resolve_anchor(
         _rome_to_amsterdam_schedule(),
-        at=datetime.fromisoformat("2026-10-16T16:45:00+00:00"),
+        at=datetime.fromisoformat("2025-10-16T16:45:00+00:00"),
         home_address="home",
     )
     assert anchor.address == "Via de' Ciancaleoni 49, Rome"
@@ -1054,7 +1054,7 @@ def test_the_airport_departure_origin_is_the_city_the_operator_is_still_in():
 def test_the_new_lodging_takes_over_once_the_inbound_flight_lands():
     anchor = resolve_anchor(
         _rome_to_amsterdam_schedule(),
-        at=datetime.fromisoformat("2026-10-16T21:00:00+00:00"),
+        at=datetime.fromisoformat("2025-10-16T21:00:00+00:00"),
         home_address="home",
     )
     assert anchor.address == "Schiphol Boulevard 701, Schiphol"
@@ -1065,12 +1065,12 @@ def test_a_mid_stay_flight_days_later_does_not_move_the_check_in():
     schedule[4] = {
         "type": "Flight",
         "summary": "Day trip",
-        "start": "2026-10-18T07:00:00Z",
-        "end": "2026-10-18T09:00:00Z",
+        "start": "2025-10-18T07:00:00Z",
+        "end": "2025-10-18T09:00:00Z",
     }
-    schedule[5] = {**schedule[5], "start": "2026-10-19T08:00:00Z"}
+    schedule[5] = {**schedule[5], "start": "2025-10-19T08:00:00Z"}
     anchor = resolve_anchor(
-        schedule, at=datetime.fromisoformat("2026-10-16T16:45:00+00:00"), home_address="home"
+        schedule, at=datetime.fromisoformat("2025-10-16T16:45:00+00:00"), home_address="home"
     )
     assert anchor.address == "Schiphol Boulevard 701, Schiphol"
 
