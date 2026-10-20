@@ -12,9 +12,11 @@ that plans again is forgotten, so a later failure is news again. Only legs due
 within `NOTICE_HORIZON` count; a drive months out has time to resolve itself.
 
 Hint, not authority (`coding-policy: stateful-artifacts`): a missing,
-unreadable or other-version file reads as "nothing noticed yet", with a stderr
+unreadable or older-version file reads as "nothing noticed yet", with a stderr
 diagnostic for anything but a plain missing file. The cost is one repeated
-notice, never a missed drive. Schema in `state-schema.md`.
+notice, never a missed drive. A file of a newer version belongs to a newer
+engine: it is left untouched and this sweep sends no notice, rather than
+announce every missing drive on every sweep. Schema in `state-schema.md`.
 """
 
 from __future__ import annotations
@@ -66,7 +68,12 @@ def _key(leg: HeldLeg) -> str:
     return f"{leg.kind}|{leg.identity}"
 
 
+class _NewerStore(Exception):
+    """The notice file carries a schema_version this reader does not know yet."""
+
+
 def _load() -> dict[str, dict]:
+    """The recorded entries; raises `_NewerStore` for a newer-version file."""
     path = _path()
     if not path.exists():
         return {}
@@ -78,7 +85,10 @@ def _load() -> dict[str, dict]:
             file=sys.stderr,
         )
         return {}
-    if not isinstance(payload, dict) or payload.get("schema_version") != NOTICES_SCHEMA_VERSION:
+    version = payload.get("schema_version") if isinstance(payload, dict) else None
+    if type(version) is int and version > NOTICES_SCHEMA_VERSION:
+        raise _NewerStore(f"{path} is schema_version {version}")
+    if type(version) is not int or version != NOTICES_SCHEMA_VERSION:
         print(
             f"[drive-engine] unplanned-notices {path} is not schema_version "
             f"{NOTICES_SCHEMA_VERSION}; starting fresh",
@@ -132,7 +142,16 @@ def due_notices(missing: list[HeldLeg], *, now: datetime) -> list[HeldLeg]:
     """
     if now.tzinfo is None:
         raise ValueError("due_notices: `now` must be timezone-aware")
-    entries = _load()
+    try:
+        entries = _load()
+    except _NewerStore as exc:
+        print(
+            f"[drive-engine] unplanned-notices {exc}, newer than this engine's "
+            f"{NOTICES_SCHEMA_VERSION}; leaving it untouched and sending no notice — "
+            "deploy the current nanoclaw-travel plugin",
+            file=sys.stderr,
+        )
+        return []
     current: dict[str, HeldLeg] = {}
     for leg in missing:
         if leg.when is None or not (now <= leg.when <= now + NOTICE_HORIZON):

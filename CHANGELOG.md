@@ -8,7 +8,9 @@ A leg the engine cannot compute this sweep is now held, not gone: a failed or im
 
 Airports route by byAir's coordinates: `get_airport` already returns `lat`/`lon`, which now reach `AirportContext`, the airport-facts cache (schema 2; a version-1 entry is refetched once for them) and the engine's routing point, while the block still reads "BNA airport". TomTom takes a `"lat,lon"` place without geocoding it. An airport without coordinates still routes by name, and a TomTom answer for a name-routed airport is refused, so that leg holds.
 
-A held leg with no block on the calendar is a drive that is simply missing, which the #335 skips showed can go unnoticed. The sweep now tells the operator once, after the leg has been missing for an hour and when it is due within 14 days ("Couldn't plan Drive: → BNA (Mon Nov 02, 11:40): route failed"), recorded in the new `unplanned-notices.json` (`unplanned_notices.py`).
+A held leg with no block on the calendar is a drive that is simply missing, which the #335 skips showed can go unnoticed. The sweep now tells the operator once, after the leg has been missing for an hour and when it is due within 14 days ("Couldn't plan Drive: → BNA (Mon Nov 02, 11:40): route failed"), recorded in the new `unplanned-notices.json` (`unplanned_notices.py`). The line ends with what to check (the flight in byAir, the event's location and time, the stay's address in TripIt) or to add the drive by hand. A local drive held under its trip's outer leg is not missing while that outer block stands, and an under-way meeting's return is due at the meeting's end, not its start. A notice file from a newer engine is left untouched and no notice goes out.
+
+A byAir record the sweep cannot read (unresolved airports, no scheduled departure) no longer costs its flight's blocks: the airport blocks of any flight departing within the merge tolerance of that record's departure are held, and a record with no readable departure holds every airport block that sweep. When neither way home routes, a drive trip's return also holds the local drive back it may have absorbed, so it is not recreated beside the retained return.
 
 ## 0.2.152 — 2026-10-19
 

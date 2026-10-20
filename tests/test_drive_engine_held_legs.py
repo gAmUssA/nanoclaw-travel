@@ -345,7 +345,25 @@ def test_the_notice_line_reads_in_the_operator_zone():
     line = reconcile_sweep._unplanned_line(
         _held(when=datetime(2025, 11, 2, 17, 40, tzinfo=UTC)), "America/Chicago"
     )
-    assert line == "Couldn't plan Drive: → BNA (Sun Nov 02, 11:40): route failed"
+    assert line == (
+        "Couldn't plan Drive: → BNA (Sun Nov 02, 11:40): route failed. "
+        "Check the flight in byAir, or add the drive to the calendar yourself."
+    )
+
+
+@pytest.mark.parametrize(
+    ("kind", "check"),
+    [
+        ("meeting_return", "the event's location and time"),
+        ("lodging_outbound", "the stay's address in TripIt"),
+    ],
+)
+def test_the_notice_line_says_what_to_check(kind, check):
+    leg = HeldLeg(identity="x", kind=kind, summary="Drive: X", when=None, reason="r: no route")
+    assert reconcile_sweep._unplanned_line(leg, None) == (
+        f"Couldn't plan Drive: X: no route. Check {check}, "
+        "or add the drive to the calendar yourself."
+    )
 
 
 def test_unplanned_lines_reach_the_rendered_notice():
@@ -472,7 +490,10 @@ def test_a_meeting_under_way_keeps_its_drives():
         legs=(),
     )
     _blocks, _skipped, held = meeting_desired_blocks([under_way], route=lambda o, d: None)
-    assert {leg.key for leg in held} == {("m2", "meeting_outbound"), ("m2", "meeting_return")}
+    assert {leg.key: leg.when for leg in held} == {
+        ("m2", "meeting_outbound"): start,
+        ("m2", "meeting_return"): start + timedelta(hours=2),
+    }
 
 
 def test_a_declined_meeting_holds_nothing():
@@ -508,3 +529,73 @@ def test_a_malformed_cache_version_reads_as_no_cache(tmp_path, monkeypatch, vers
     )
     assert airport_facts_cache.load_static_facts() == {}
     assert "refetching" in capsys.readouterr().err
+
+
+# --- review round 3 (#336) ----------------------------------------------------
+
+
+def _byair_record(scheduled_dep_time, fid=7):
+    return {
+        "flight_id": fid,
+        "dep_airport_id": 1,
+        "arr_airport_id": 2,
+        "scheduled_dep_time": scheduled_dep_time,
+    }
+
+
+def _sweep_plan(records, current, resolve=lambda _id: None):
+    return reconcile_sweep.build_plan(
+        flight_records=records,
+        resolve_airport=resolve,
+        meeting_blocks=[],
+        current_blocks=current,
+        route=lambda o, d: timedelta(minutes=40),
+        now=NOW,
+        home_address=HOME,
+    )
+
+
+def test_an_unreadable_byair_record_keeps_its_airport_block():
+    """A byAir record whose airports do not resolve leaves the desired set; its
+    block must not read as an orphan on that malformed answer."""
+    identity = _identity_of("airport_departure")
+    current = [_block(identity, "airport_departure")]
+    result = _sweep_plan([_byair_record("2025-10-22T15:00:00Z")], current)
+    assert result.plan.deletes == ()
+    assert [leg.key for leg in result.held] == [(identity, "airport_departure")]
+
+
+def test_a_byair_record_without_a_departure_keeps_every_airport_block():
+    identity = _identity_of("airport_departure")
+    current = [_block(identity, "airport_departure"), _block("m9", "meeting_return", "evt-2")]
+    result = _sweep_plan([_byair_record(None)], current)
+    assert [d.event_id for d in result.plan.deletes] == ["evt-2"]
+
+
+def test_an_unreadable_record_of_another_flight_leaves_the_orphan_to_go():
+    identity = _identity_of("airport_departure")
+    current = [_block(identity, "airport_departure")]
+    result = _sweep_plan([_byair_record("2025-10-25T15:00:00Z")], current)
+    assert [d.event_id for d in result.plan.deletes] == ["evt-1"]
+
+
+def test_a_newer_notice_file_is_left_untouched(state_dir, capsys):
+    newer = '{"schema_version": 2, "legs": {"kept": "as is"}}'
+    (state_dir / "unplanned-notices.json").write_text(newer, encoding="utf-8")
+    for hour in (0, 1, 2):
+        assert unplanned_notices.due_notices([_held()], now=NOW + timedelta(hours=hour)) == []
+    assert (state_dir / "unplanned-notices.json").read_text(encoding="utf-8") == newer
+    assert "newer than this engine" in capsys.readouterr().err
+
+
+def test_a_local_drive_covered_by_its_outer_block_is_not_missing():
+    local = HeldLeg(
+        identity="mtg-back",
+        kind="meeting_return",
+        summary="Drive: Game",
+        when=NOW + timedelta(days=1),
+        reason="lodging trip-1: lodging→home route failed",
+        covered_by=(("trip-1", KIND_RETURN),),
+    )
+    assert reconcile_sweep._missing([local], [_block("trip-1", KIND_RETURN)]) == []
+    assert reconcile_sweep._missing([local], []) == [local]

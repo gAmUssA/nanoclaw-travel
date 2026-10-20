@@ -96,7 +96,9 @@ class HeldLeg:
 
     `identity` and `kind` key it like a `DesiredBlock`, so its current blocks are
     found and left untouched. `summary`, `when` (the leg's anchor) and `reason`
-    describe it for the operator when no block exists to hold.
+    describe it for the operator when no block exists to hold. `covered_by` are
+    the keys of outer legs whose block, when present, makes this drive (a local
+    leg an outer drive absorbed) already on the calendar.
     """
 
     identity: str
@@ -104,6 +106,7 @@ class HeldLeg:
     summary: str
     when: datetime | None
     reason: str
+    covered_by: tuple[tuple[str, str], ...] = ()
 
     @property
     def key(self) -> tuple[str, str]:

@@ -937,3 +937,75 @@ def test_meetings_on_trip_upper_bound_matches_the_context_window():
 
     beyond = _meeting("beyond", late_out + timedelta(days=2))
     assert meetings_on_trip(trip, [beyond], route=local) == {}
+
+
+def _held_with_venue(local_blocks, **route_kw):
+    trips = find_drive_trips(_schedule(), now=NOW, window=timedelta(days=30))
+    ctx = context_from_blocks(trips, local_blocks)[TRIP_KEY]
+    return lodging_desired_blocks(
+        trips,
+        route=_venue_router(**route_kw),
+        home_address=HOME,
+        verdicts={},
+        contexts={TRIP_KEY: ctx},
+        now=NOW,
+    )
+
+
+def test_a_return_that_cannot_route_holds_the_local_drive_it_absorbed():
+    """#336 review: an earlier sweep left from the stadium and absorbed the drive
+    back to the released room. With neither way home routable, that drive is
+    held under the return, not recreated beside the retained return block."""
+    back = _local(
+        "mtg-back",
+        "meeting_return",
+        CHECK_OUT + timedelta(hours=8),
+        CHECK_OUT + timedelta(hours=9),
+        "Stadium",
+        HOTEL_ADDRESS,
+    )
+    _blocks, _skipped, _plans, held = _held_with_venue(
+        [back],
+        home_hotel=timedelta(hours=2),
+        home_venue=timedelta(hours=2),
+        hotel_home=None,
+        venue_home=None,
+    )
+    by_key = {leg.key: leg for leg in held}
+    assert set(by_key) == {(TRIP_KEY, KIND_RETURN), ("mtg-back", "meeting_return")}
+    assert by_key[("mtg-back", "meeting_return")].covered_by == ((TRIP_KEY, KIND_RETURN),)
+
+
+def test_a_return_with_the_room_still_held_holds_only_itself():
+    back = _local(
+        "mtg-back",
+        "meeting_return",
+        CHECK_OUT - timedelta(hours=6),
+        CHECK_OUT - timedelta(hours=5),
+        "Stadium",
+        HOTEL_ADDRESS,
+    )
+    _blocks, _skipped, _plans, held = _held_with_venue(
+        [back],
+        home_hotel=timedelta(hours=2),
+        home_venue=timedelta(hours=2),
+        hotel_home=None,
+        venue_home=None,
+    )
+    assert [leg.key for leg in held] == [(TRIP_KEY, KIND_RETURN)]
+
+
+def test_an_unplannable_trip_holds_its_local_drives_under_the_outer_legs():
+    out = _local(
+        "mtg-out",
+        "meeting_outbound",
+        CHECK_IN + timedelta(hours=3),
+        CHECK_IN + timedelta(hours=4),
+        HOTEL_ADDRESS,
+        "Stadium",
+    )
+    _blocks, _skipped, _plans, held = _held_with_venue(
+        [out], home_hotel=None, home_venue=None, hotel_home=None, venue_home=None
+    )
+    local = next(leg for leg in held if leg.key == ("mtg-out", "meeting_outbound"))
+    assert local.covered_by == ((TRIP_KEY, KIND_OUTBOUND),)

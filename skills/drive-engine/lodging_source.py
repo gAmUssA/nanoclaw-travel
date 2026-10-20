@@ -662,30 +662,35 @@ def lodging_desired_blocks(
             HeldLeg(identity=trip.key, kind=kind, summary=summary, when=when, reason=reason)
         )
 
+    def hold_absorbed(trip: DriveTrip, local: LocalLeg, outer: str, reason: str) -> None:
+        """Hold a local drive an earlier sweep may have absorbed into the trip's
+        `outer` leg: recreating it beside that retained block would put a second
+        drive on the calendar for one journey. The caller drops a held local leg
+        from the desired set, and the outer block, when present, covers it."""
+        held.append(
+            HeldLeg(
+                identity=local.identity,
+                kind=local.kind,
+                summary=f"Drive: {local.label}",
+                when=local.start,
+                reason=f"{reason} — its outer legs may absorb this drive",
+                covered_by=((trip.key, outer),),
+            )
+        )
+
     def hold_trip(trip: DriveTrip, reason: str) -> None:
         """Hold both legs of a trip that could not be planned at all, unless the
-        operator said it is flown: a flown trip has no drive to keep.
-
-        The trip's first and last local drives are held with them: an earlier
-        sweep may have absorbed them into the outer legs, and recreating them now
-        would put a second drive on the calendar for one journey. The caller
-        drops a held local leg from the desired set."""
+        operator said it is flown: a flown trip has no drive to keep. The trip's
+        first and last local drives are held with them (`hold_absorbed`)."""
         recorded = verdicts.get(trip.key)
         if recorded is not None and recorded.is_operator_answer and recorded.verdict == VERDICT_FLY:
             skipped.append(f"{reason} — flying, nothing held")
             return
         ctx = contexts.get(trip.key)
-        for local in (ctx.first_out, ctx.last_back) if ctx is not None else ():
-            if local is not None:
-                held.append(
-                    HeldLeg(
-                        identity=local.identity,
-                        kind=local.kind,
-                        summary=f"Drive: {local.label}",
-                        when=local.start,
-                        reason=f"{reason} — its outer legs may absorb this drive",
-                    )
-                )
+        if ctx is not None:
+            for local, outer in ((ctx.first_out, KIND_OUTBOUND), (ctx.last_back, KIND_RETURN)):
+                if local is not None:
+                    hold_absorbed(trip, local, outer, reason)
         skipped.append(reason)
         held.append(
             HeldLeg(
@@ -773,13 +778,18 @@ def lodging_desired_blocks(
             # Return. Mirror case: the last local drive comes BACK to a lodging
             # the operator has already checked out of, so leave from the venue.
             back = ctx.last_back
+            released = (
+                back
+                if back is not None and trip.check_out is not None and back.start >= trip.check_out
+                else None
+            )
             returning: DesiredBlock | None = None
             absorbs_back: tuple[str, str] | None = None
-            if back is not None and trip.check_out is not None and back.start >= trip.check_out:
-                direct_home = route(back.venue, home_address)
+            if released is not None:
+                direct_home = route(released.venue, home_address)
                 if direct_home is None:
                     skipped.append(
-                        f"lodging {trip.key} return: {back.label}→home route failed — "
+                        f"lodging {trip.key} return: {released.label}→home route failed — "
                         "routing via the lodging"
                     )
                 else:
@@ -788,20 +798,18 @@ def lodging_desired_blocks(
                         ctx,
                         direct_home,
                         home_address,
-                        origin=back.venue,
-                        label=back.label,
-                        depart_after=back.start,
+                        origin=released.venue,
+                        label=released.label,
+                        depart_after=released.start,
                     )
-                    absorbs_back = back.key
+                    absorbs_back = released.key
             if returning is None:
                 return_drive = route(trip.address, home_address)
                 if return_drive is None:
-                    hold(
-                        trip,
-                        KIND_RETURN,
-                        trip.check_out,
-                        f"lodging {trip.key}: lodging→home route failed",
-                    )
+                    reason = f"lodging {trip.key}: lodging→home route failed"
+                    hold(trip, KIND_RETURN, trip.check_out, reason)
+                    if released is not None:
+                        hold_absorbed(trip, released, KIND_RETURN, reason)
                 else:
                     returning = _return_block(trip, ctx, return_drive, home_address)
                     if returning is None:

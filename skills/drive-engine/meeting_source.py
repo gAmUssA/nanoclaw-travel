@@ -222,7 +222,11 @@ def meeting_desired_blocks(
                         identity=meeting.meeting_id,
                         kind=kind,
                         summary=f"Drive: {meeting.summary}",
-                        when=meeting.start,
+                        when=(
+                            meeting.start
+                            if kind == "meeting_outbound"
+                            else meeting.end or meeting.start
+                        ),
                         reason=f"meeting {meeting.meeting_id}: {meeting.reason}",
                     )
                 )

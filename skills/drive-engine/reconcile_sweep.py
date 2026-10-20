@@ -51,6 +51,7 @@ from block_codec import ParsedBlock, parse_block  # noqa: E402
 from calendar_apply import apply_plan  # noqa: E402
 from drive_decision import load_verdicts, mark_asked, prune, record_drive_time  # noqa: E402
 from engine import AirportInfo, build_reconcile_plan  # noqa: E402
+from flight_identity import DEFAULT_IDENTITY_TOLERANCE  # noqa: E402
 from flight_mask import flight_codes, is_flight_event, known_flight_codes  # noqa: E402
 from lodging_source import (  # noqa: E402
     context_from_blocks,
@@ -234,6 +235,7 @@ def build_plan(
     flights = list(tripit_flights or [])
     airport_info: dict[str, AirportInfo] = {}
     skipped: list[str] = []
+    unreadable: list[tuple[str, datetime | None]] = []
 
     for record in flight_records:
         dep_id = record.get("dep_airport_id")
@@ -241,12 +243,15 @@ def build_plan(
         dep = resolve_airport(dep_id) if isinstance(dep_id, int) else None
         arr = resolve_airport(arr_id) if isinstance(arr_id, int) else None
         if dep is None or dep.iata is None or arr is None or arr.iata is None:
-            skipped.append(f"flight {record.get('flight_id')}: unresolved airport(s)")
+            why = f"flight {record.get('flight_id')}: unresolved airport(s)"
+            skipped.append(why)
+            unreadable.append((why, _scheduled_departure(record)))
             continue
         try:
             flights.append(flight_from_byair(record, dep_iata=dep.iata, arr_iata=arr.iata))
         except ValueError as exc:
             skipped.append(str(exc))
+            unreadable.append((str(exc), _scheduled_departure(record)))
             continue
         airport_info[dep.iata] = AirportInfo(
             flag=dep.flag,
@@ -275,10 +280,82 @@ def build_plan(
         live_origin=live_origin,
         boarding_present=boarding_present,
         extra_desired=meeting_blocks + list(lodging_blocks or []),
-        extra_held=list(held or []),
+        extra_held=list(held or []) + _unreadable_flight_holds(unreadable, current_blocks),
         managed_legacy=_MANAGED_LEGACY,
     )
     return PlanResult(plan=result.plan, skipped=tuple(skipped) + result.skipped, held=result.held)
+
+
+_AIRPORT_KINDS = frozenset({"airport_departure", "airport_arrival", "airport_transfer"})
+
+
+def _scheduled_departure(record: dict) -> datetime | None:
+    """A byAir record's scheduled departure in UTC, None when it has none."""
+    raw = record.get("scheduled_dep_time")
+    if not isinstance(raw, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC) if parsed.tzinfo is not None else None
+
+
+def _flight_departures(identity: str) -> list[datetime] | None:
+    """The scheduled departures an airport block's identity is keyed on
+    (`block_codec.canonical_flight_key`, one per flight), None when unreadable."""
+    departures = []
+    for part in identity.split("|"):
+        try:
+            departures.append(
+                datetime.strptime(part.rsplit("-", 1)[-1], "%Y%m%dT%H%MZ").replace(tzinfo=UTC)
+            )
+        except ValueError:
+            return None
+    return departures
+
+
+def _unreadable_flight_holds(
+    unreadable: list[tuple[str, datetime | None]], current: list[ParsedBlock]
+) -> list[HeldLeg]:
+    """Hold the airport blocks a byAir record this sweep could not read may own.
+
+    Left out of the desired set, the record's legs would read as orphans and
+    their blocks be deleted on a malformed upstream answer. A block is held when
+    one of its flights departs within the merge tolerance of an unreadable
+    record's scheduled departure; a record with no readable departure holds
+    every airport block. A held airport block that a readable source (TripIt)
+    still plans is updated as usual: holding only stops the orphan delete."""
+    if not unreadable:
+        return []
+    blind = [why for why, when in unreadable if when is None]
+    held: list[HeldLeg] = []
+    for block in current:
+        if block.identity is None or block.kind not in _AIRPORT_KINDS:
+            continue
+        departures = _flight_departures(block.identity)
+        if blind or departures is None:
+            reason = blind[0] if blind else unreadable[0][0]
+        else:
+            near = [
+                why
+                for why, when in unreadable
+                if when is not None
+                and any(abs(dep - when) <= DEFAULT_IDENTITY_TOLERANCE for dep in departures)
+            ]
+            if not near:
+                continue
+            reason = near[0]
+        held.append(
+            HeldLeg(
+                identity=block.identity,
+                kind=block.kind,
+                summary=f"Drive: {block.origin or '?'} → {block.destination or '?'}",
+                when=block.anchor,
+                reason=f"byAir {reason}",
+            )
+        )
+    return held
 
 
 # --- real-client wiring (I/O) -----------------------------------------------
@@ -1220,10 +1297,14 @@ def _run_sweep() -> dict:
 def _missing(
     held: tuple[HeldLeg, ...] | list[HeldLeg], current: list[ParsedBlock]
 ) -> list[HeldLeg]:
-    """The held legs with no block of their own on the calendar — drives that
-    are simply absent, not kept."""
+    """The held legs with no block on the calendar, of their own or of an outer
+    leg covering them — drives that are simply absent, not kept."""
     present = {(block.identity, block.kind) for block in current if block.identity is not None}
-    return [leg for leg in held if leg.key not in present]
+    return [
+        leg
+        for leg in held
+        if leg.key not in present and not any(key in present for key in leg.covered_by)
+    ]
 
 
 def _unplanned_notices(
@@ -1244,9 +1325,17 @@ def _unplanned_notices(
         return []
 
 
+# What the operator can check for a drive the engine cannot plan, by leg family.
+_UNPLANNED_CHECK = {
+    "airport": "the flight in byAir",
+    "meeting": "the event's location and time",
+    "lodging": "the stay's address in TripIt",
+}
+
+
 def _unplanned_line(leg: HeldLeg, zone: str | None) -> str:
     """One operator line for a drive the engine cannot plan: the drive, when,
-    and the reason after the leg's diagnostic tag."""
+    the reason after the leg's diagnostic tag, and what to do about it."""
     when = ""
     if leg.when is not None:
         local = leg.when
@@ -1257,7 +1346,11 @@ def _unplanned_line(leg: HeldLeg, zone: str | None) -> str:
                 local = leg.when.astimezone(UTC)
         when = f" ({local.strftime('%a %b %d, %H:%M')})"
     reason = leg.reason.split(": ", 1)[1] if ": " in leg.reason else leg.reason
-    return f"Couldn't plan {leg.summary}{when}: {reason}"
+    check = _UNPLANNED_CHECK.get(leg.kind.split("_", 1)[0], "the trip's details")
+    return (
+        f"Couldn't plan {leg.summary}{when}: {reason}. "
+        f"Check {check}, or add the drive to the calendar yourself."
+    )
 
 
 def main() -> int:
