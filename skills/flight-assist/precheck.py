@@ -41,7 +41,7 @@ import time
 import traceback
 import urllib.error
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _BUNDLE_DIR = Path(__file__).resolve().parent
@@ -62,15 +62,19 @@ from connection_risk import (  # noqa: E402
     detect_connection_risks,
 )
 from maps_client import MapsClient, MapsError  # noqa: E402
+from operator_tz import READER_TIMEOUT_SECONDS, OperatorTz, read_operator_tz  # noqa: E402
 from phase_markers import (  # noqa: E402
+    boarding_window_open,
     check_arrival_logistics,
     check_day_before,
     check_gate_assignment,
     check_time_to_leave,
+    day_before_due,
     gate_assignment_window_open,
     is_boarding_or_gone,
 )
 from state import (  # noqa: E402
+    StateError,
     read_active_flights,
     read_config,
     read_flight_state,
@@ -151,8 +155,16 @@ _MAPS_CALL_TIMEOUT_SECONDS = 8.0
 # covered the byAir poll, so a flight started just under the budget ran byAir
 # (8s) + Maps (10s default) ≈ 18s and overran the kill, surfacing as
 # `execfile-error` (jbaruch/nanoclaw#562 traced the heartbeat wake-storm partly
-# to these crashes). Deriving the headroom from the two call timeouts keeps it
-# correct if either changes.
+# to these crashes). Deriving the headroom from the call timeouts keeps it
+# correct if any of them changes.
+#
+# The operator-zone reader (#300) runs inside `_process_flight` too, between the
+# byAir poll and the Maps query, on the flight that first needs a `day_before`
+# label. It spawns at most once per cycle, so its timeout is not in the base
+# headroom: `_run_cycle` holds `_READER_RESERVE_SECONDS` back from a flight's
+# start deadline only while the reader has not run yet AND that flight could
+# fire its `day_before` this cycle (#312). A cycle whose flights have all fired
+# theirs keeps the full budget.
 _SCRIPT_KILL_BUDGET_SECONDS = 30.0
 _INTERPRETER_TEARDOWN_HEADROOM_SECONDS = 4.0
 _CYCLE_POLL_HEADROOM_SECONDS = (
@@ -161,6 +173,7 @@ _CYCLE_POLL_HEADROOM_SECONDS = (
     + _INTERPRETER_TEARDOWN_HEADROOM_SECONDS
 )
 _CYCLE_WALL_CLOCK_BUDGET_SECONDS = _SCRIPT_KILL_BUDGET_SECONDS - _CYCLE_POLL_HEADROOM_SECONDS
+_READER_RESERVE_SECONDS = READER_TIMEOUT_SECONDS
 
 
 def main() -> int:
@@ -171,7 +184,7 @@ def main() -> int:
     # subsequent run, so the outermost catch emits a safe-shape JSON +
     # writes the traceback to stderr per error-handling.md's carve-out.
     try:
-        now_utc = datetime.now(timezone.utc)
+        now_utc = datetime.now(UTC)
         # Defense-in-depth trip-window gate (#147). The host pre-spawn gate
         # (jbaruch/nanoclaw#754) should already keep the container from spawning
         # off-window; if one spawns anyway, bail here — before any byAir call —
@@ -184,8 +197,16 @@ def main() -> int:
             print(f"flight-assist precheck: {window.reason}", file=sys.stderr)
             _emit({"wake_agent": False, "data": {"reason": "outside_trip_window"}})
             return 0
-        events = _run_cycle(now_utc=now_utc)
-        _emit({"wake_agent": bool(events), "data": {"events": events}})
+        poll_failed: set[int] = set()
+        events = _run_cycle(now_utc=now_utc, poll_failures=poll_failed)
+        data: dict = {"events": events}
+        if poll_failed:
+            # A failed poll must not read as a quiet, healthy cycle (#326).
+            # Alerting on a sustained outage is sync_tripit.py's job (its
+            # consecutive-failure counter); this keeps the run log honest.
+            data["error"] = "byair_poll_failed"
+            data["poll_failed_ids"] = sorted(poll_failed)
+        _emit({"wake_agent": bool(events), "data": data})
         return 0
     except Exception:  # noqa: BLE001 — outer-boundary-process-contract
         traceback.print_exc(file=sys.stderr)
@@ -202,8 +223,14 @@ def _run_cycle(
     *,
     now_utc: datetime,
     monotonic: Callable[[], float] = time.monotonic,
+    operator_tz_reader: Callable[[], OperatorTz | None] = read_operator_tz,
+    poll_failures: set[int] | None = None,
 ) -> list[dict]:
     """Execute one precheck cycle, return aggregated wake events.
+
+    `poll_failures`, when given, receives the ids of flights whose byAir
+    poll was attempted this cycle and failed (non-404 byAir error or
+    transport error), so the caller can mark the run as failed (#326).
 
     `now_utc` is injected so tests can pin the clock without monkey-patching
     the `datetime` module (which breaks `fromisoformat()` deeper in the
@@ -214,9 +241,19 @@ def _run_cycle(
     `time.monotonic`. It measures elapsed time for the poll-loop budget;
     `now_utc` is logical (cadence) time and must not be reused here because
     a test that pins `now_utc` would otherwise freeze the budget clock too.
+
+    `operator_tz_reader` resolves the operator's current zone for the
+    `day_before` day label (#300). The default spawns the core `current-tz`
+    reader (`travel-core/operator_tz.py`), so it is wrapped below in a
+    once-per-cycle memo and only ever called when a `day_before` is about
+    to fire — a cycle whose flights have all fired theirs never pays for
+    the subprocess, and every flight in one cycle sees the same zone. Its
+    timeout is held back from a flight's start deadline only while that
+    flight could still be the one to spawn it (#312).
     """
     active_flight_ids = read_active_flights()
     config = read_config() or {}
+    resolve_operator_tz = _memoized_operator_tz(operator_tz_reader)
     # Trip-aware (#122): "home" for this cycle is the static residence
     # off-trip, but the current lodging while a TripIt trip is active —
     # routing a time-to-leave from a residence an ocean away is worse than
@@ -261,9 +298,17 @@ def _run_cycle(
     removed_upstream_ids: set[int] = set()
     poll_failed_ids: set[int] = set()
     deferred_ids: set[int] = set()
+    # Which flights could spawn the zone reader this cycle: their deadline
+    # carries the reader reserve until the reader has run (#312).
+    may_spawn_reader = {fid for fid in active_flight_ids if _may_spawn_reader(fid, now_utc)}
     poll_deadline = monotonic() + _CYCLE_WALL_CLOCK_BUDGET_SECONDS
     for index, flight_id in enumerate(active_flight_ids):
-        if monotonic() >= poll_deadline:
+        reserve = (
+            _READER_RESERVE_SECONDS
+            if flight_id in may_spawn_reader and not resolve_operator_tz.resolved
+            else 0.0
+        )
+        if monotonic() >= poll_deadline - reserve:
             # Budget elapsed. Defer this flight and every flight after it
             # to the next cycle rather than risk the agent-runner's 30s
             # hard-kill mid-poll. Their `last_polled_at` is left untouched
@@ -287,6 +332,7 @@ def _run_cycle(
                 byair=byair,
                 maps=maps,
                 time_to_leave_origin=cycle_origin,
+                resolve_operator_tz=resolve_operator_tz,
             )
         except ByAirError as byair_err:
             # 404 on the byAir side means the flight is no longer
@@ -341,6 +387,8 @@ def _run_cycle(
     # using leg-1's live, freshly-polled snapshot. So the firing decision never
     # rests on a skipped flight's unverified snapshot, and a tight connection
     # where leg-1 is imminent but leg-2 sits just past the horizon still fires.
+    if poll_failures is not None:
+        poll_failures.update(poll_failed_ids)
     excluded_ids = removed_upstream_ids | poll_failed_ids | deferred_ids
     risk_candidate_ids = [fid for fid in active_flight_ids if fid not in excluded_ids]
     aggregated_events.extend(
@@ -351,6 +399,65 @@ def _run_cycle(
         )
     )
     return aggregated_events
+
+
+class _OperatorTzMemo:
+    """The zone reader, spawned at most once per cycle and only on demand.
+
+    Calling it runs `reader` the first time and caches the answer (the IANA
+    name, or None when no zone is available); later calls return the cache.
+    Nothing runs until something asks, so the subprocess is paid for only by
+    a cycle that is about to fire a `day_before` (#300). `resolved` tells the
+    poll loop whether the spawn is still ahead, so the loop reserves its
+    timeout only until then (#312).
+    """
+
+    def __init__(self, reader: Callable[[], OperatorTz | None]) -> None:
+        self._reader = reader
+        self._cache: list[str | None] = []
+
+    @property
+    def resolved(self) -> bool:
+        return bool(self._cache)
+
+    def __call__(self) -> str | None:
+        if not self._cache:
+            zone = self._reader()
+            self._cache.append(zone.tz if zone is not None else None)
+        return self._cache[0]
+
+
+def _memoized_operator_tz(reader: Callable[[], OperatorTz | None]) -> _OperatorTzMemo:
+    """Wrap the zone reader in a once-per-cycle, on-demand memo."""
+    return _OperatorTzMemo(reader)
+
+
+def _may_spawn_reader(flight_id: int, now_utc: datetime) -> bool:
+    """Whether processing this flight this cycle could spawn the zone reader.
+
+    `_process_flight` asks for the zone only when `day_before_due` holds for
+    the flight's persisted departure and markers, so the same predicate
+    answers here, behind the same `_due_for_poll` gate: a flight inside its
+    cadence interval returns before any label is asked for. A flight with no
+    state yet is first seen this cycle: its departure is unknown until byAir
+    answers, so it may. So may a flight whose record does not read (corrupt,
+    or an I/O error): this pre-pass only sizes a deadline, and the record
+    still fails loudly when its own turn to poll comes, after the flights
+    ahead of it have polled.
+    """
+    try:
+        prior_state = read_flight_state(flight_id)
+    except (StateError, OSError):
+        return True
+    if prior_state is None:
+        return True
+    if not _due_for_poll(prior_state, now_utc):
+        return False
+    return day_before_due(
+        scheduled_dep_time=prior_state.get("scheduled_dep_time"),
+        phase_markers=prior_state.get("phase_markers") or {},
+        now_utc=now_utc,
+    )
 
 
 def _check_connection_risks(
@@ -433,6 +540,7 @@ def _process_flight(
     byair: ByAirClient,
     maps: MapsClient | None,
     time_to_leave_origin: str | None,
+    resolve_operator_tz: Callable[[], str | None] = lambda: None,
 ) -> list[dict]:
     """Process a single flight: cadence-gate, fetch, diff, emit events.
 
@@ -440,6 +548,12 @@ def _process_flight(
     and passed in here, so every flight processed in the same cycle
     agrees on the user's location even when the host-orchestrator-owned
     `current-location.json` is rewritten mid-cycle.
+
+    `resolve_operator_tz` is `_run_cycle`'s once-per-cycle memo of the
+    operator's zone; it is consulted only when `phase_markers.day_before_due`
+    says the `day_before` fires this cycle, so the reader subprocess never
+    runs for a flight that is not about to be labelled. The default (no
+    zone) is the standalone-call shape and yields the explicit-date label.
     """
     prior_state = read_flight_state(flight_id)
     prior_snapshot = prior_state.get("last_snapshot") if prior_state else None
@@ -486,8 +600,40 @@ def _process_flight(
         scheduled_dep_time=scheduled_dep_time,
         boarding_lead_minutes=boarding_lead_minutes,
     )
-    readout_unreachable = window_open is None or is_boarding_or_gone(new_snapshot)
-    delta_events = detect_wake_events(prior_snapshot, new_snapshot, scheduled_dep_time)
+    # The planned boarding window (effective dep − lead: byAir's live dep_time
+    # when the snapshot has one, else scheduled — the same instant and lead the
+    # boarding block uses): byAir's "boarding" label before it is premature by construction
+    # (#295). Each snapshot is judged at the instant it was polled — the fresh
+    # one now, the prior one at its own `last_polled_at` — so the first
+    # in-window poll fires the transition even when the raw label never moved.
+    boarding_open = boarding_window_open(
+        scheduled_dep_time=scheduled_dep_time,
+        boarding_lead_minutes=boarding_lead_minutes,
+        snapshot=new_snapshot,
+    )
+    readout_unreachable = window_open is None or is_boarding_or_gone(
+        new_snapshot, boarding_window_open=boarding_open, at=now_utc
+    )
+    # The prior snapshot is judged against the window as it stood at its own
+    # poll: its own effective departure and its own lead (Copilot on #306).
+    prev_boarding_open = (
+        boarding_window_open(
+            scheduled_dep_time=scheduled_dep_time,
+            boarding_lead_minutes=_resolve_boarding_lead_minutes(prior_snapshot),
+            snapshot=prior_snapshot,
+        )
+        if prior_snapshot
+        else None
+    )
+    delta_events = detect_wake_events(
+        prior_snapshot,
+        new_snapshot,
+        scheduled_dep_time,
+        boarding_window_open=boarding_open,
+        now_utc=now_utc,
+        prev_polled_at=_parse_iso8601(prior_state.get("last_polled_at")) if prior_state else None,
+        prev_boarding_window_open=prev_boarding_open,
+    )
     delta_events = _filter_gate_changes(
         delta_events,
         readout_fired_before=readout_fired_before,
@@ -501,10 +647,22 @@ def _process_flight(
 
     # Time-based events from phase_markers.
 
+    # The zone is asked for only when the day_before gate is open this cycle:
+    # a flight already past its marker, more than a day out, or with an
+    # unparseable departure never triggers the reader spawn, and the memo
+    # makes a second ask in the same cycle free (#300).
+    operator_tz = (
+        resolve_operator_tz()
+        if day_before_due(
+            scheduled_dep_time=scheduled_dep_time, phase_markers=phase_markers, now_utc=now_utc
+        )
+        else None
+    )
     fired, event = check_day_before(
         scheduled_dep_time=scheduled_dep_time,
         phase_markers=phase_markers,
         now_utc=now_utc,
+        operator_tz=operator_tz,
     )
     if fired and event is not None:
         phase_markers["day_before_fired"] = True
@@ -524,6 +682,7 @@ def _process_flight(
         phase_markers=phase_markers,
         now_utc=now_utc,
         snapshot=new_snapshot,
+        boarding_lead_minutes=boarding_lead_minutes,
     )
     if fired and event is not None:
         phase_markers["time_to_leave_fired"] = True
@@ -868,7 +1027,7 @@ def _parse_iso8601(value: str | None) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed
 
 

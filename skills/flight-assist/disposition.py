@@ -38,7 +38,7 @@ stdlib-only (`datetime`) per `coding-policy: dependency-management`.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from calendar_plan import (
     DISPOSITION_ACTIVE,
@@ -77,7 +77,7 @@ def _to_instant(value: str, *, field: str) -> datetime:
         raise DispositionError(f"{field} is not an RFC 3339 datetime: {value!r}") from exc
     if parsed.tzinfo is None:
         raise DispositionError(f"{field} is missing a UTC offset: {value!r}")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(UTC)
 
 
 def _effective_arrival(flight_state: dict) -> datetime:
@@ -116,7 +116,7 @@ def resolve_disposition(flight_state: dict, *, in_active_flights: bool, now: dat
     """
     if now.tzinfo is None:
         raise DispositionError("now must be timezone-aware")
-    now_utc = now.astimezone(timezone.utc)
+    now_utc = now.astimezone(UTC)
 
     snapshot = flight_state.get("last_snapshot") or {}
     status = snapshot.get("computed_status") if isinstance(snapshot, dict) else None

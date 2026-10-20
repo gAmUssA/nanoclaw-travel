@@ -39,12 +39,18 @@ from leg_anchor import AirportFacts, BufferOverrides, ConcreteLeg, resolve_leg_a
 from position import opened_from_home, position_at, resolve_leg_origin
 from reconcile import (
     DesiredBlock,
+    HeldLeg,
     ParsedBlock,
     ReconcilePlan,
     legacy_keys_for_airport_leg,
     plan_reconcile,
 )
 from suppression import is_trivial_leg
+
+# No real drive to or from an airport runs this long; a longer one means the
+# origin or destination resolved to the wrong city (a 16.8 h Schiphol→FCO
+# "drive", #323). Such a leg writes no block and reports why.
+MAX_AIRPORT_DRIVE = timedelta(hours=6)
 
 RouteFn = Callable[[str, str], "timedelta | None"]
 BoardingPresentFn = Callable[[MergedFlight], bool]
@@ -58,12 +64,21 @@ class AirportInfo:
     flag: str | None = None
     delay_index: str | None = None
     timezone: str | None = None  # IANA tz — the airport block's local display tz
+    lat: float | None = None  # byAir coordinates — the airport's routing point
+    lon: float | None = None
 
 
 @dataclass(frozen=True)
 class EngineResult:
     plan: ReconcilePlan
     skipped: tuple[str, ...] = ()  # human diagnostics for legs that couldn't be built
+    # Legs that exist but could not be computed this sweep; their blocks are kept.
+    held: tuple[HeldLeg, ...] = ()
+
+
+# A builder's outcome: the block, or None with a diagnostic, and whether the leg
+# is held (it exists but could not be computed) rather than deliberately absent.
+Built = tuple["DesiredBlock | None", "str | None", bool]
 
 
 def _facts_for(flight: MergedFlight, airport_info: dict[str, AirportInfo]) -> AirportFacts:
@@ -79,11 +94,21 @@ def _facts_for(flight: MergedFlight, airport_info: dict[str, AirportInfo]) -> Ai
 
 
 def _airport_place(iata: str) -> str:
-    """A geocodable place string for an airport IATA code. The maps route can't
-    reliably resolve a bare 3-letter code (`STN`) — meeting legs route because they
-    carry full addresses — so feed it the form MapsClient documents, `"STN airport"`
-    (#165)."""
+    """The display form of an airport endpoint, `"STN airport"`, written on the
+    block. Also the routing form when the airport has no coordinates: the maps
+    route can't reliably resolve a bare 3-letter code (#165)."""
     return f"{iata} airport"
+
+
+def _airport_point(iata: str, airport_info: dict[str, AirportInfo]) -> str:
+    """Where the maps route goes for an airport: its byAir coordinates as
+    `"lat,lon"` when known, else the text `_airport_place`. Text is geocoded, and
+    the backup provider geocoded "SFO airport" as the town of Airport, MO (#334);
+    `reconcile_sweep.make_route` refuses a backup answer for a text airport."""
+    info = airport_info.get(iata)
+    if info is not None and info.lat is not None and info.lon is not None:
+        return f"{info.lat},{info.lon}"
+    return _airport_place(iata)
 
 
 def _leg_past(kind: LegKind, concrete: ConcreteLeg, now: datetime) -> bool:
@@ -125,37 +150,51 @@ def _legacy_keys(leg: ConcreteLeg) -> frozenset[tuple[str, str, str]]:
     return legacy_keys_for_airport_leg(kind, leg.flight.byair_flight_ids)
 
 
+def _implausible(side: str, leg: ConcreteLeg, drive: timedelta, origin: str, dest: str) -> str:
+    hours = drive.total_seconds() / 3600
+    return (
+        f"{side} {leg_identity(leg)}: implausible {hours:.1f} h drive {origin} → {dest}, "
+        "not written — check the trip's lodging and transport times in TripIt"
+    )
+
+
 def _build_departure(
     leg: ConcreteLeg,
     *,
     schedule: list[dict] | None,
     home_address: str | None,
+    home_metros: frozenset[str],
     now: datetime,
     live_origin: str | None,
     route: RouteFn,
     boarding_present: BoardingPresentFn,
-) -> tuple[DesiredBlock | None, str | None]:
+    airport_info: dict[str, AirportInfo],
+) -> Built:
     anchor = leg.anchor
     assert anchor is not None and leg.dest_airport is not None
     dest = _airport_place(leg.dest_airport)
-    planned = position_at(schedule, anchor, home_address=home_address)
+    dest_point = _airport_point(leg.dest_airport, airport_info)
+    planned = position_at(schedule, anchor, home_address=home_address, home_metros=home_metros)
     if planned.address is None:
-        return None, f"departure {leg_identity(leg)}: no origin (position_at unresolved)"
-    approx = route(planned.address, dest)
+        return None, f"departure {leg_identity(leg)}: no origin (position_at unresolved)", True
+    approx = route(planned.address, dest_point)
     if approx is None:
-        return None, f"departure {leg_identity(leg)}: origin route failed"
+        return None, f"departure {leg_identity(leg)}: origin route failed", True
     leave_by = anchor - approx
     resolved = resolve_leg_origin(
         planned, now=now, leave_by=leave_by, drive=approx, live_origin=live_origin
     )
     origin = resolved.address or planned.address
-    drive = route(origin, dest)
+    drive = route(origin, dest_point)
     if drive is None:
-        return None, f"departure {leg_identity(leg)}: route failed"
+        return None, f"departure {leg_identity(leg)}: route failed", True
+    if drive > MAX_AIRPORT_DRIVE:
+        return None, _implausible("departure", leg, drive, origin, dest), True
     if is_trivial_leg(drive, presence_block_present=boarding_present(leg.flight)):
         return (
             None,
             f"departure {leg_identity(leg)}: trivial ({int(drive.total_seconds())}s), suppressed",
+            False,
         )
     leave_by = anchor - drive
     return (
@@ -173,6 +212,7 @@ def _build_departure(
             legacy_keys=_legacy_keys(leg),
         ),
         None,
+        False,
     )
 
 
@@ -181,27 +221,32 @@ def _build_arrival(
     *,
     schedule: list[dict] | None,
     home_address: str | None,
+    home_metros: frozenset[str],
     return_home: bool,
     route: RouteFn,
     boarding_present: BoardingPresentFn,
-) -> tuple[DesiredBlock | None, str | None]:
+    airport_info: dict[str, AirportInfo],
+) -> Built:
     anchor = leg.anchor
     assert anchor is not None and leg.origin_airport is not None
     origin = _airport_place(leg.origin_airport)
+    origin_point = _airport_point(leg.origin_airport, airport_info)
     if return_home:
         destination = home_address
         destination_label = "home"
     else:
-        planned = position_at(schedule, anchor, home_address=home_address)
+        planned = position_at(schedule, anchor, home_address=home_address, home_metros=home_metros)
         destination = planned.address
         destination_label = _dest_label(planned)
     if destination is None:
-        return None, f"arrival {leg_identity(leg)}: no destination (position_at unresolved)"
-    drive = route(origin, destination)
+        return None, f"arrival {leg_identity(leg)}: no destination (position_at unresolved)", True
+    drive = route(origin_point, destination)
     if drive is None:
-        return None, f"arrival {leg_identity(leg)}: route failed"
+        return None, f"arrival {leg_identity(leg)}: route failed", True
+    if drive > MAX_AIRPORT_DRIVE:
+        return None, _implausible("arrival", leg, drive, origin, destination), True
     if is_trivial_leg(drive, presence_block_present=boarding_present(leg.flight)):
-        return None, f"arrival {leg_identity(leg)}: trivial, suppressed"
+        return None, f"arrival {leg_identity(leg)}: trivial, suppressed", False
     return (
         DesiredBlock(
             identity=leg_identity(leg),
@@ -217,17 +262,25 @@ def _build_arrival(
             legacy_keys=_legacy_keys(leg),
         ),
         None,
+        False,
     )
 
 
-def _build_transfer(leg: ConcreteLeg, *, route: RouteFn) -> tuple[DesiredBlock | None, str | None]:
+def _build_transfer(
+    leg: ConcreteLeg, *, route: RouteFn, airport_info: dict[str, AirportInfo]
+) -> Built:
     assert leg.origin_airport is not None and leg.dest_airport is not None
     assert leg.window_start is not None and leg.window_end is not None
     origin = _airport_place(leg.origin_airport)
     dest = _airport_place(leg.dest_airport)
-    drive = route(origin, dest)
+    drive = route(
+        _airport_point(leg.origin_airport, airport_info),
+        _airport_point(leg.dest_airport, airport_info),
+    )
     if drive is None:
-        return None, f"transfer {leg_identity(leg)}: route failed"
+        return None, f"transfer {leg_identity(leg)}: route failed", True
+    if drive > MAX_AIRPORT_DRIVE:
+        return None, _implausible("transfer", leg, drive, origin, dest), True
     leave_by = leg.window_end - drive
     return (
         DesiredBlock(
@@ -244,6 +297,25 @@ def _build_transfer(leg: ConcreteLeg, *, route: RouteFn) -> tuple[DesiredBlock |
             timezone=leg.timezone,
         ),
         None,
+        False,
+    )
+
+
+_LEG_KIND_NAME = {
+    LegKind.AIRPORT_DEPARTURE: "airport_departure",
+    LegKind.AIRPORT_ARRIVAL: "airport_arrival",
+    LegKind.AIRPORT_TRANSFER: "airport_transfer",
+}
+
+
+def _held_leg(concrete: ConcreteLeg, reason: str) -> HeldLeg:
+    when = concrete.window_end if concrete.kind is LegKind.AIRPORT_TRANSFER else concrete.anchor
+    return HeldLeg(
+        identity=leg_identity(concrete),
+        kind=_LEG_KIND_NAME[concrete.kind],
+        summary=_summary(concrete),
+        when=when,
+        reason=reason,
     )
 
 
@@ -255,12 +327,14 @@ def build_reconcile_plan(
     route: RouteFn,
     schedule: list[dict] | None = None,
     home_address: str | None = None,
+    home_metros: frozenset[str] = frozenset(),
     now: datetime,
     live_origin: str | None = None,
     boarding_present: BoardingPresentFn | None = None,
     left_terminal: LeftTerminalFn | None = None,
     overrides: BufferOverrides | None = None,
     extra_desired: list[DesiredBlock] | None = None,
+    extra_held: list[HeldLeg] | None = None,
     managed_legacy: frozenset[str] | None = None,
 ) -> EngineResult:
     """Run the full engine pipeline and return the reconcile plan + diagnostics.
@@ -270,9 +344,16 @@ def build_reconcile_plan(
     reports whether a flight's boarding block exists (for trivial suppression);
     default assumes present. `left_terminal` supplies same-airport "did you leave"
     geofence evidence. `extra_desired` folds in blocks from another source (the
-    meeting-leg source) so both are diffed against the calendar in one reconcile.
-    `managed_legacy`, when given, is passed through to `plan_reconcile` to scope
-    which legacy generations the engine may converge / orphan-delete.
+    meeting-leg source) so both are diffed against the calendar in one reconcile,
+    and `extra_held` the legs those sources could not compute, so their blocks are
+    kept (#334). `managed_legacy`, when given, is passed through to
+    `plan_reconcile` to scope which legacy generations the engine may converge /
+    orphan-delete.
+
+    A leg that could not be computed — no resolvable position, a failed or
+    implausible route, a drive window already past — is held, never dropped: its
+    existing block stays as it is. Only a deliberately suppressed leg (a trivial
+    drive) leaves the desired set, so its block is deleted.
 
     `route` runs to completion — there is no routing deadline (#211). A hung
     provider is bounded by the maps client's own per-call timeout (a failed leg
@@ -306,11 +387,14 @@ def build_reconcile_plan(
         # Ask whether the JOURNEY left home, not whether the operator happened to
         # be standing in the house at that instant — those come apart when he
         # stages at an airport hotel the night before (#235, `opened_from_home`).
-        if opened_from_home(schedule, at=opening_anchor, home_address=home_address):
+        if opened_from_home(
+            schedule, at=opening_anchor, home_address=home_address, home_metros=home_metros
+        ):
             homecoming_flights.add(last)
 
     desired: list[DesiredBlock] = []
     skipped: list[str] = []
+    held: list[HeldLeg] = []
 
     for chain in chains:
         contexts = build_pair_contexts(chain, schedule=schedule, left_terminal=left_terminal)
@@ -330,9 +414,13 @@ def build_reconcile_plan(
                     overrides=overrides,
                 )
                 if _leg_past(planned.kind, concrete, now):
-                    skipped.append(f"transfer {leg_identity(concrete)}: past, skipped")
+                    diag = f"transfer {leg_identity(concrete)}: past, skipped"
+                    skipped.append(diag)
+                    held.append(_held_leg(concrete, diag))
                     continue
-                block, diag = _build_transfer(concrete, route=route)
+                block, diag, hold = _build_transfer(
+                    concrete, route=route, airport_info=airport_info
+                )
             elif planned.kind is LegKind.AIRPORT_DEPARTURE:
                 flight = planned.to_flight
                 if flight is None:
@@ -342,16 +430,20 @@ def build_reconcile_plan(
                     planned, facts=_facts_for(flight, airport_info), overrides=overrides
                 )
                 if _leg_past(planned.kind, concrete, now):
-                    skipped.append(f"departure {leg_identity(concrete)}: past, skipped")
+                    diag = f"departure {leg_identity(concrete)}: past, skipped"
+                    skipped.append(diag)
+                    held.append(_held_leg(concrete, diag))
                     continue
-                block, diag = _build_departure(
+                block, diag, hold = _build_departure(
                     concrete,
                     schedule=schedule,
                     home_address=home_address,
+                    home_metros=home_metros,
                     now=now,
                     live_origin=live_origin,
                     route=route,
                     boarding_present=boarding_present,
+                    airport_info=airport_info,
                 )
             else:  # AIRPORT_ARRIVAL
                 flight = planned.from_flight
@@ -362,24 +454,36 @@ def build_reconcile_plan(
                     planned, facts=_facts_for(flight, airport_info), overrides=overrides
                 )
                 if _leg_past(planned.kind, concrete, now):
-                    skipped.append(f"arrival {leg_identity(concrete)}: past, skipped")
+                    diag = f"arrival {leg_identity(concrete)}: past, skipped"
+                    skipped.append(diag)
+                    held.append(_held_leg(concrete, diag))
                     continue
-                block, diag = _build_arrival(
+                block, diag, hold = _build_arrival(
                     concrete,
                     schedule=schedule,
                     home_address=home_address,
+                    home_metros=home_metros,
                     return_home=flight in homecoming_flights,
                     route=route,
                     boarding_present=boarding_present,
+                    airport_info=airport_info,
                 )
             if block is not None:
                 desired.append(block)
             if diag is not None:
                 skipped.append(diag)
+                if hold:
+                    held.append(_held_leg(concrete, diag))
 
     if extra_desired:
         desired.extend(extra_desired)
+    held.extend(extra_held or [])
 
-    reconcile_kwargs = {} if managed_legacy is None else {"managed_legacy": managed_legacy}
-    plan = plan_reconcile(desired, current_blocks, **reconcile_kwargs)
-    return EngineResult(plan=plan, skipped=tuple(skipped))
+    held_keys = frozenset(leg.key for leg in held)
+    if managed_legacy is None:
+        plan = plan_reconcile(desired, current_blocks, held=held_keys, now=now)
+    else:
+        plan = plan_reconcile(
+            desired, current_blocks, managed_legacy=managed_legacy, held=held_keys, now=now
+        )
+    return EngineResult(plan=plan, skipped=tuple(skipped), held=tuple(held))

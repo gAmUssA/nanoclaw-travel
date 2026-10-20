@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import copy
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -77,7 +77,7 @@ def _snapshot(**overrides) -> dict:
     return base
 
 
-_NOW = datetime(2026, 5, 17, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 5, 17, 12, 0, 0, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +406,7 @@ def test_leg1_diverted_does_not_fire_connection_risk():
 
 def test_leg1_more_than_24h_away_does_not_fire():
     """Delay projections > 24h out are speculative; don't fire."""
-    far_now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=timezone.utc)  # ~26h before dep
+    far_now = datetime(2026, 5, 16, 12, 0, 0, tzinfo=UTC)  # ~26h before dep
     states = [
         _state(
             flight_id=1,

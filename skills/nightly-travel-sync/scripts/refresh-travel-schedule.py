@@ -6,7 +6,7 @@ import time
 import urllib.error
 import urllib.request
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 # travel-core owns the `Check-in:` / `Check-out:` discriminator this writer
@@ -121,13 +121,13 @@ def _parse_dt(s):
     s = s.strip()
     try:
         return (
-            datetime.strptime(s.rstrip("Z"), "%Y%m%dT%H%M%S").replace(tzinfo=timezone.utc),
+            datetime.strptime(s.rstrip("Z"), "%Y%m%dT%H%M%S").replace(tzinfo=UTC),
             True,
         )
     except ValueError:
         pass
     try:
-        return datetime.strptime(s, "%Y%m%d").replace(tzinfo=timezone.utc), False
+        return datetime.strptime(s, "%Y%m%d").replace(tzinfo=UTC), False
     except ValueError:
         return None, False
 
@@ -166,7 +166,7 @@ def main():
     # Unfold ICS line continuations (RFC 5545: CRLF + whitespace = continuation)
     ics = re.sub(r"\r?\n[ \t]", "", ics)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
 
     # First pass: parse every VEVENT into a record. The past-event filter
     # is deferred to a second pass so Lodging events can be paired before

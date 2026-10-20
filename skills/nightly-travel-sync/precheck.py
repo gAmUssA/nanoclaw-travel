@@ -52,7 +52,7 @@ import json
 import os
 import sys
 import traceback
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # 20h — a daily refresh, deliberately NOT the exact 24h multiple of the daily
@@ -106,7 +106,7 @@ def decide(now_utc: datetime, db_path: Path) -> dict:
             "data": {"reason": "no_travel_db", "path": str(db_path)},
         }
 
-    mtime = datetime.fromtimestamp(db_path.stat().st_mtime, tz=timezone.utc)
+    mtime = datetime.fromtimestamp(db_path.stat().st_mtime, tz=UTC)
     age = now_utc - mtime
     age_hours = round(age.total_seconds() / 3600.0, 2)
 
@@ -166,7 +166,7 @@ def main() -> int:
     # `jbaruch/coding-policy: error-handling`. Sole catch-all in the file.
     try:
         db_path = Path(os.environ.get("NIGHTLY_TRAVEL_SYNC_DB", DEFAULT_DB_PATH))
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         payload = decide(now, db_path)
     except Exception:  # noqa: BLE001 — outer-boundary-process-contract
         traceback.print_exc(file=sys.stderr)

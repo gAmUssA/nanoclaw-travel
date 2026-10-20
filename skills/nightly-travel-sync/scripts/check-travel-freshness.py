@@ -15,7 +15,7 @@ Exit code is always 0 — the agent decides what to do based on the JSON status.
 import json
 import pathlib
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 SCHEDULE_PATH = pathlib.Path("/workspace/group/travel-schedule.json")
 STALE_THRESHOLD_DAYS = 7
@@ -34,8 +34,8 @@ def main():
         )
         return 0
 
-    mtime = datetime.fromtimestamp(SCHEDULE_PATH.stat().st_mtime, tz=timezone.utc)
-    age = datetime.now(timezone.utc) - mtime
+    mtime = datetime.fromtimestamp(SCHEDULE_PATH.stat().st_mtime, tz=UTC)
+    age = datetime.now(UTC) - mtime
     age_days = round(age.total_seconds() / 86400, 2)
 
     if age < timedelta(days=STALE_THRESHOLD_DAYS):

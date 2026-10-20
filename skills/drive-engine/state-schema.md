@@ -8,6 +8,7 @@ Each on-disk file has one owner module that owns its schema (only it migrates `s
 
 - `skip-state.json` — owned by `skip_state.py`. Writer and reader are co-bundled and go through the owner API: the skip action (`skip_drive.py`) writes via `add_skip`, the sweep (`reconcile_sweep.py`) reads via `load_active_skips`. No skill rewrites the file directly.
 - `airport-facts.json` — owned by `airport_facts_cache.py`. The sweep (`reconcile_sweep.py`) both reads (`load_static_facts`) and writes (`store_static_facts`) through the owner API (#211).
+- `unplanned-notices.v1.json` — owned by `skills/drive-engine/unplanned_notices.py`. The sweep (`skills/drive-engine/reconcile_sweep.py`) reads and writes it through `due_notices` (#334).
 - `drive-decisions.json` — owned by `drive_decision.py`. The sweep writes the drive-time-derived verdict (`record_drive_time`, `mark_asked`) and the answer action (`answer_drive_or_fly.py`) writes the operator's (`record_operator_answer`). `check-travel-bookings` is a read-only, non-migrating consumer in another skill (#231).
 
 `skip_state.py` came from the retired `drive-planner` (#156), whose bundle was folded into drive-engine once drive-engine was its only importer (#181).
@@ -60,21 +61,21 @@ Migration:
 
 ### `airport-facts.json`
 
-The cross-sweep cache of **static** airport facts — IATA code, country flag, IANA timezone — keyed by byAir `airport_id`. Owned by `airport_facts_cache.py`. Introduced in #211 to stop the sweep re-fetching immutable facts from byAir every ~30-min cycle (~7.6s at 13 airports, the dominant plan-phase cost that froze the calendar).
+The cross-sweep cache of **static** airport facts — IATA code, country flag, IANA timezone, coordinates — keyed by byAir `airport_id`. Owned by `airport_facts_cache.py`. Introduced in #211 to stop the sweep re-fetching immutable facts from byAir every ~30-min cycle (~7.6s at 13 airports, the dominant plan-phase cost that froze the calendar).
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "airports": {
-    "3": {"iata": "JFK", "flag": "🇺🇸", "tz": "America/New_York"}
+    "3": {"iata": "JFK", "flag": "🇺🇸", "tz": "America/New_York", "lat": 40.6413, "lon": -73.7781}
   }
 }
 ```
 
 Fields:
 
-- `schema_version` (int, required) — currently `1`
-- `airports` (object, required) — map of `airport_id` (string key) → `{iata, flag, tz}`. `iata` is always a non-empty string (a None-IATA resolution is a transient miss, never cached); `flag` / `tz` may be `null`.
+- `schema_version` (int, required) — currently `2`
+- `airports` (object, required) — map of `airport_id` (string key) → `{iata, flag, tz, lat, lon}`. `iata` is always a non-empty string (a None-IATA resolution is a transient miss, never cached); `flag` / `tz` may be `null`. `lat` / `lon` (numbers within ±90 / ±180, or `null`) are byAir's coordinates, the point the engine routes the airport by (#334); an out-of-range or non-numeric value reads as `null`.
 
 Writer / reader contract:
 
@@ -86,7 +87,40 @@ Tolerance — **hint, not authority** (the deliberate opposite of `skip-state.js
 - A **missing**, **unreadable/corrupt**, **non-object**, or **future-versioned** file all resolve to an **empty map** — the sweep re-fetches from byAir this cycle, exactly the pre-cache behaviour. Nothing raises; a diagnostic goes to stderr for anything but a plain missing file. A stale-vs-fresh static fact costs only latency, never a wrong block, so failing closed (as the skip store does) would be the wrong trade.
 - Malformed individual entries (missing/empty `iata`, non-object value, non-integer key) are dropped; a well-formed remainder is still returned.
 
-Migration: `schema_version` `1` is the initial version. Because a future version reads as no-usable-prior-state (refetch, non-disruptive), a newer writer's file survives untouched until this reader is upgraded — no fail-closed refusal is needed (`coding-policy: stateful-artifacts`, Cross-Pipeline Schema Bumps). The refetch is non-disruptive even when byAir is also down: a cache-miss airport that byAir can't resolve makes `reconcile_sweep._resolve_one_airport` raise `AirportUnresolved`, failing the whole sweep closed rather than building a partial plan that would orphan-delete live blocks (#211). So the empty-map fallback never escalates work — it costs at most one slow (or skipped) sweep, never a wrong or deleted block.
+Migration: version `2` added `lat` / `lon` (#334). The owner reads a version-`1` file as version 2 with no coordinates and rewrites it as version 2 on that read (a failed rewrite is a stderr diagnostic, retried next read); the sweep then refetches each airport without coordinates once (`reconcile_sweep._resolve_one_airport`). Because a future version reads as no-usable-prior-state (refetch, non-disruptive), a newer writer's file survives untouched until this reader is upgraded — no fail-closed refusal is needed (`coding-policy: stateful-artifacts`, Cross-Pipeline Schema Bumps). The refetch is non-disruptive even when byAir is also down: a cache-miss airport that byAir can't resolve makes `reconcile_sweep._resolve_one_airport` raise `AirportUnresolved`, failing the whole sweep closed rather than building a partial plan that would orphan-delete live blocks (#211). So the empty-map fallback never escalates work — it costs at most one slow (or skipped) sweep, never a wrong or deleted block.
+
+### `unplanned-notices.v1.json`
+
+Which drives the engine has told the operator it cannot plan, so each is mentioned once. Owned by `skills/drive-engine/unplanned_notices.py` (#334). An announced held leg (`HeldLeg.announce`) with no block on the calendar is a missing drive; the sweep mentions it once it has been missing for `PERSIST_BEFORE_NOTICE` and only while it falls within `NOTICE_HORIZON` (constants at the top of `skills/drive-engine/unplanned_notices.py`). A hold that only keeps blocks in place is never announced.
+
+```json
+{
+  "schema_version": 1,
+  "legs": {
+    "airport_departure|BNA-LGA-20261102T1840Z": {
+      "first_seen": "2026-10-19T20:30:00Z",
+      "expires": "2026-11-03T17:40:00Z",
+      "notified": true
+    }
+  }
+}
+```
+
+Fields:
+
+- `schema_version` (int, required) — currently `1`
+- `legs` (object, required) — map of `<kind>|<identity>` (the leg's reconcile key) → `{first_seen, expires, notified}`. `first_seen` is when the sweep first found the leg missing in this spell, `expires` when the entry lapses (set by `skills/drive-engine/unplanned_notices.py` from the leg's time), both UTC `YYYY-MM-DDTHH:MM:SSZ`; `notified` is whether the operator was told.
+
+Writer / reader contract:
+
+- **Writer / Reader** — the sweep calls `due_notices(missing, now=...)` once per sweep. An entry absent from this sweep's missing legs is dropped (the drive planned again, so a later failure is news again); an expired entry restarts its spell.
+- A write failure raises `OSError`; the sweep reports it on stderr and sends no unplanned-drive notice that sweep. The plan is unaffected.
+
+Versioned file name: each `schema_version` keeps its own file, `unplanned-notices.v<N>.json`, so engines of different versions never read or write each other's record. A shape change bumps the version and with it the file name; the new owner may read the previous version's file to migrate it. After an upgrade or a rollback the running engine starts or resumes its own file, at the cost of at most one repeated notice, and never touches another version's.
+
+Tolerance — hint, not authority: a missing, unreadable, non-object or malformed file (another `schema_version`, no `legs` object) reads as "nothing noticed yet", with a stderr diagnostic for anything but a plain missing file. The cost is one repeated notice, never a missed drive. Malformed entries are dropped.
+
+Migration: `schema_version` `1` is the initial version.
 
 ### `drive-decisions.json`
 

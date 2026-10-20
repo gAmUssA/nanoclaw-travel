@@ -69,7 +69,7 @@ from drive_decision import (  # noqa: E402
     TripVerdict,
 )
 from lodging import CHECK_IN, CHECK_OUT, hotel_name, lodging_role  # noqa: E402
-from reconcile import DesiredBlock  # noqa: E402
+from reconcile import DesiredBlock, HeldLeg  # noqa: E402
 from trip_key import trip_key  # noqa: E402
 from trip_origin import parse_schedule_time  # noqa: E402
 
@@ -555,6 +555,32 @@ def context_from_blocks(
     return contexts
 
 
+def _released_return(trip: DriveTrip, ctx: TripContext) -> LocalLeg | None:
+    """The trip's last local drive when it comes back to a lodging already
+    checked out of: the return home then leaves from its venue."""
+    back = ctx.last_back
+    if back is not None and trip.check_out is not None and back.start >= trip.check_out:
+        return back
+    return None
+
+
+def _outbound_anchor(trip: DriveTrip, ctx: TripContext) -> datetime:
+    """When the outbound must land: the first local drive's departure, else
+    check-in — `_outbound_block`'s default."""
+    return ctx.onward_start or trip.check_in
+
+
+def _return_anchor(trip: DriveTrip, ctx: TripContext) -> datetime | None:
+    """When the return leaves: from the venue of a released-room last drive,
+    else the later of check-out and the last local drive — `_return_block`'s
+    default. None when the trip has neither."""
+    released = _released_return(trip, ctx)
+    if released is not None:
+        return released.start
+    candidates = [when for when in (trip.check_out, ctx.trailing_end) if when is not None]
+    return max(candidates) if candidates else None
+
+
 def _outbound_block(
     trip: DriveTrip,
     ctx: TripContext,
@@ -572,7 +598,7 @@ def _outbound_block(
     outbound goes straight to the venue rather than through a hotel the
     operator would arrive at and depart from in the same instant.
     """
-    arrive_by = arrive_by or ctx.onward_start or trip.check_in
+    arrive_by = arrive_by or _outbound_anchor(trip, ctx)
     return DesiredBlock(
         identity=trip.key,
         kind=KIND_OUTBOUND,
@@ -631,34 +657,94 @@ def lodging_desired_blocks(
     verdicts: dict[str, TripVerdict],
     contexts: dict[str, TripContext] | None = None,
     now: datetime,
-) -> tuple[list[DesiredBlock], list[str], list[TripPlan]]:
+) -> tuple[list[DesiredBlock], list[str], list[TripPlan], list[HeldLeg]]:
     """Plan the getting-there legs for each flight-less trip.
 
-    Returns `(blocks, skipped_diagnostics, plans)`. `plans` carries every trip's
-    resolved verdict and the question owed on it, for the caller to persist and
-    send — this module writes no state and sends nothing.
+    Returns `(blocks, skipped_diagnostics, plans, held)`. `plans` carries every
+    trip's resolved verdict and the question owed on it, for the caller to
+    persist and send — this module writes no state and sends nothing.
 
     A trip yields blocks only when the effective verdict is a drive. A route
     failure or an unconfigured home skips the trip with a diagnostic rather than
-    guessing; a leg whose anchor has already passed is dropped the way
-    `engine._leg_past` drops a stale airport leg.
+    guessing, and so does a leg whose anchor has already passed, the way
+    `engine._leg_past` treats a stale airport leg. Each of those legs is HELD
+    (#334): its current block is kept rather than orphan-deleted. A trip the
+    verdict says is flown, or not yet decided, plans no leg and holds none.
     """
     blocks: list[DesiredBlock] = []
     skipped: list[str] = []
     plans: list[TripPlan] = []
+    held: list[HeldLeg] = []
     contexts = contexts or {}
 
-    if home_address is None:
-        if trips:
-            skipped.append(
-                f"lodging legs: no home address configured — {len(trips)} drive trip(s) unplanned"
+    def hold(trip: DriveTrip, kind: str, when: datetime | None, reason: str) -> None:
+        skipped.append(reason)
+        summary = (
+            f"Drive: home → {trip.hotel}"
+            if kind == KIND_OUTBOUND
+            else f"Drive: {trip.hotel} → home"
+        )
+        held.append(
+            HeldLeg(identity=trip.key, kind=kind, summary=summary, when=when, reason=reason)
+        )
+
+    def hold_absorbed(trip: DriveTrip, local: LocalLeg, reason: str) -> None:
+        """Hold a local drive an earlier sweep may have absorbed into the trip's
+        outer leg: recreating it beside that retained block would put a second
+        drive on the calendar for one journey. The caller drops a held local leg
+        from the desired set; the outer leg, held with it, is the one reported."""
+        held.append(
+            HeldLeg(
+                identity=local.identity,
+                kind=local.kind,
+                summary=f"Drive: {local.label}",
+                when=local.start,
+                reason=f"{reason} — its outer legs may absorb this drive",
+                announce=False,
             )
-        return blocks, skipped, plans
+        )
+
+    def hold_trip(trip: DriveTrip, reason: str) -> None:
+        """Hold both legs of a trip that could not be planned at all, unless the
+        operator said it is flown: a flown trip has no drive to keep. The trip's
+        first and last local drives are held with them (`hold_absorbed`)."""
+        recorded = verdicts.get(trip.key)
+        if recorded is not None and recorded.is_operator_answer and recorded.verdict == VERDICT_FLY:
+            skipped.append(f"{reason} — flying, nothing held")
+            return
+        ctx = contexts.get(trip.key, TripContext())
+        for local in (ctx.first_out, ctx.last_back):
+            if local is not None:
+                hold_absorbed(trip, local, reason)
+        skipped.append(reason)
+        held.append(
+            HeldLeg(
+                identity=trip.key,
+                kind=KIND_OUTBOUND,
+                summary=f"Drive: home → {trip.hotel}",
+                when=_outbound_anchor(trip, ctx),
+                reason=reason,
+            )
+        )
+        held.append(
+            HeldLeg(
+                identity=trip.key,
+                kind=KIND_RETURN,
+                summary=f"Drive: {trip.hotel} → home",
+                when=_return_anchor(trip, ctx),
+                reason=reason,
+            )
+        )
+
+    if home_address is None:
+        for trip in trips:
+            hold_trip(trip, f"lodging {trip.key}: no home address configured — unplanned")
+        return blocks, skipped, plans, held
 
     for trip in trips:
         outbound_drive = route(home_address, trip.address)
         if outbound_drive is None:
-            skipped.append(f"lodging {trip.key}: home→lodging route failed")
+            hold_trip(trip, f"lodging {trip.key}: home→lodging route failed")
             continue
 
         band = classify_drive(outbound_drive)
@@ -707,18 +793,23 @@ def lodging_desired_blocks(
             else:
                 # The outbound is not planned, so a local drive it would have
                 # absorbed has to stand on its own.
-                skipped.append(f"lodging {trip.key} outbound: past, skipped")
+                hold(
+                    trip,
+                    KIND_OUTBOUND,
+                    outbound.anchor,
+                    f"lodging {trip.key} outbound: past, skipped",
+                )
 
             # Return. Mirror case: the last local drive comes BACK to a lodging
             # the operator has already checked out of, so leave from the venue.
-            back = ctx.last_back
+            released = _released_return(trip, ctx)
             returning: DesiredBlock | None = None
             absorbs_back: tuple[str, str] | None = None
-            if back is not None and trip.check_out is not None and back.start >= trip.check_out:
-                direct_home = route(back.venue, home_address)
+            if released is not None:
+                direct_home = route(released.venue, home_address)
                 if direct_home is None:
                     skipped.append(
-                        f"lodging {trip.key} return: {back.label}→home route failed — "
+                        f"lodging {trip.key} return: {released.label}→home route failed — "
                         "routing via the lodging"
                     )
                 else:
@@ -727,22 +818,35 @@ def lodging_desired_blocks(
                         ctx,
                         direct_home,
                         home_address,
-                        origin=back.venue,
-                        label=back.label,
-                        depart_after=back.start,
+                        origin=released.venue,
+                        label=released.label,
+                        depart_after=released.start,
                     )
-                    absorbs_back = back.key
+                    absorbs_back = released.key
             if returning is None:
                 return_drive = route(trip.address, home_address)
                 if return_drive is None:
-                    skipped.append(f"lodging {trip.key}: lodging→home route failed")
+                    reason = f"lodging {trip.key}: lodging→home route failed"
+                    hold(trip, KIND_RETURN, _return_anchor(trip, ctx), reason)
+                    if released is not None:
+                        hold_absorbed(trip, released, reason)
                 else:
                     returning = _return_block(trip, ctx, return_drive, home_address)
                     if returning is None:
-                        skipped.append(f"lodging {trip.key} return: no check-out to depart after")
+                        hold(
+                            trip,
+                            KIND_RETURN,
+                            trip.check_out,
+                            f"lodging {trip.key} return: no check-out to depart after",
+                        )
             if returning is not None:
                 if returning.anchor < now:
-                    skipped.append(f"lodging {trip.key} return: past, skipped")
+                    hold(
+                        trip,
+                        KIND_RETURN,
+                        returning.anchor,
+                        f"lodging {trip.key} return: past, skipped",
+                    )
                 else:
                     trip_blocks.append(returning)
                     if absorbs_back is not None:
@@ -765,4 +869,4 @@ def lodging_desired_blocks(
             )
         )
 
-    return blocks, skipped, plans
+    return blocks, skipped, plans, held

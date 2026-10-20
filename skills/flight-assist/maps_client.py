@@ -59,6 +59,10 @@ from pathlib import Path
 
 _GOOGLE_ENDPOINT = "https://maps.googleapis.com/maps/api/distancematrix/json"
 _GOOGLE_ROUTES_ENDPOINT = "https://routes.googleapis.com/directions/v2:computeRoutes"
+
+# A `"lat,lon"` place, routed without geocoding.
+_COORDINATES = re.compile(r"(-?\d{1,3}(?:\.\d+)?),\s*(-?\d{1,3}(?:\.\d+)?)")
+
 _TOMTOM_GEOCODE_ENDPOINT = "https://api.tomtom.com/search/2/geocode"
 _TOMTOM_ROUTE_ENDPOINT = "https://api.tomtom.com/routing/1/calculateRoute"
 
@@ -155,12 +159,18 @@ class TomTomClient:
         if not origin or not destination:
             raise ValueError("travel_time: origin and destination are required")
 
-        origin_lat, origin_lon, origin_resolved = self._geocode(origin)
-        dest_lat, dest_lon, dest_resolved = self._geocode(destination)
-        return self._route(
-            (origin_lat, origin_lon, origin_resolved),
-            (dest_lat, dest_lon, dest_resolved),
-        )
+        return self._route(self._locate(origin), self._locate(destination))
+
+    def _locate(self, place: str) -> tuple[float, float, str]:
+        """`(lat, lon, resolved)` for a place: a `"lat,lon"` pair is taken as is
+        (the drive engine routes airports by coordinates, #334), anything else
+        is geocoded."""
+        point = _COORDINATES.fullmatch(place.strip())
+        if point is not None:
+            lat, lon = float(point.group(1)), float(point.group(2))
+            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                return lat, lon, place.strip()
+        return self._geocode(place)
 
     def _geocode(self, query: str) -> tuple[float, float, str]:
         encoded = urllib.parse.quote(query, safe="")

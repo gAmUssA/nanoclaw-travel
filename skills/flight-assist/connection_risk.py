@@ -29,7 +29,7 @@ stdlib-only: `datetime` per `coding-policy: dependency-management`.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 DEFAULT_MIN_TRANSFER_MINUTES = 45
 
@@ -126,7 +126,7 @@ def _group_by_trip(flight_states: list[dict]) -> list[list[dict]]:
             continue
         by_trip.setdefault(trip_id, []).append(state)
     groups: list[list[dict]] = []
-    sentinel = datetime.max.replace(tzinfo=timezone.utc)
+    sentinel = datetime.max.replace(tzinfo=UTC)
     for trip_id in sorted(by_trip):
         legs = by_trip[trip_id]
         if len(legs) < 2:
@@ -233,5 +233,5 @@ def _parse_iso8601(value: str | None) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed

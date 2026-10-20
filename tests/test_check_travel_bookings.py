@@ -37,7 +37,7 @@ Tests freeze `module.date` (today) and `module.datetime` (now) so
 """
 
 import json
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 
 import pytest
 
@@ -46,7 +46,7 @@ _FROZEN_TODAY = date(2026, 4, 30)
 # fact rather than a function of when the suite runs.
 _ACTIVE_EXPIRY = "2026-05-19T00:00:00+00:00"
 _LAPSED_EXPIRY = "2026-04-29T00:00:00+00:00"
-_FROZEN_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
+_FROZEN_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=UTC)
 
 
 def _make_frozen_date(real_date):

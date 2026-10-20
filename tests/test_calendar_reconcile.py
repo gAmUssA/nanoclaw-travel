@@ -10,7 +10,7 @@ not the planner's internals (those are covered by `test_calendar_plan.py`).
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -33,7 +33,7 @@ from state import (  # noqa: E402
 )
 
 BYAIR_CAL = "c_byair@group.calendar.google.com"
-FIXED_NOW = datetime(2026, 7, 1, 13, 0, 0, tzinfo=timezone.utc)  # before all fixture flights arrive
+FIXED_NOW = datetime(2026, 7, 1, 13, 0, 0, tzinfo=UTC)  # before all fixture flights arrive
 
 
 @pytest.fixture
@@ -567,7 +567,7 @@ def test_deletes_reclaim_travel_block_in_same_airport_gap(state_root: Path):
         }
     )
 
-    cr.run_reconcile(client, now=datetime(2026, 7, 1, 12, 30, 0, tzinfo=timezone.utc))
+    cr.run_reconcile(client, now=datetime(2026, 7, 1, 12, 30, 0, tzinfo=UTC))
 
     deleted = client.calls_named("delete_event")
     assert [a["event_id"] for a in deleted] == ["reclaim_travel_1"]

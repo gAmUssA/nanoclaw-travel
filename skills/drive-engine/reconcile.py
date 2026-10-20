@@ -19,6 +19,14 @@ Three defect classes from the design collapse into this one diff:
   desired leg is deleted, not merely left alone. This is what clears a suppressed
   connection's stale drives (the 7× CPH storm) and pre-filter orphans, rather than
   only ceasing to create.
+
+A leg the engine could not compute this sweep — its route failed, its position
+was unresolved, its drive came out implausible, or its drive window has passed —
+is HELD, not gone (#334). Its existing blocks are left exactly as they are:
+neither updated nor orphan-deleted. Only a leg that no longer exists (the flight
+or meeting is gone, or a deliberate suppression such as a trivial drive) lets
+its block be deleted. A provider blip used to read as "this drive no longer
+exists" and deleted thirteen correct blocks in one sweep.
 """
 
 from __future__ import annotations
@@ -34,12 +42,10 @@ _KIND_TO_LEGACY_DIRECTION = {
     "airport_arrival": "from_airport",
 }
 
-# The legacy block generations the engine currently OWNS and may converge or
-# orphan-delete. Today the engine produces only airport legs, so it owns just the
-# flight-assist airport blocks (fadrive). Drive-planner MEETING blocks (dp) are NOT
-# owned yet — the engine has no meeting-leg source — so they are left completely
-# untouched (never orphaned), never mistaken for airport-leg garbage. When the
-# meeting source lands, add GEN_LEGACY_DP to the managed set.
+# The default set of legacy block generations a caller lets the engine converge or
+# orphan-delete. The live sweep overrides it with an empty set
+# (`reconcile_sweep._MANAGED_LEGACY`): the retired engines' blocks are left for the
+# operator to clean up.
 _DEFAULT_MANAGED_LEGACY = frozenset({GEN_LEGACY_FADRIVE})
 
 
@@ -62,6 +68,11 @@ class DesiredBlock:
     window_end: datetime | None = None
     timezone: str | None = None  # IANA tz the block is created in (local display)
     legacy_keys: frozenset[tuple[str, str, str]] = field(default_factory=frozenset)
+    # True when `timezone` is the operator's current zone from the core reader
+    # (#309). Only then does a zone difference on an existing block call for a
+    # patch: a fallback zone (the reader was unavailable) must not flap every
+    # block back and forth whenever the reader flickers.
+    zone_from_operator: bool = False
 
 
 def legacy_keys_for_airport_leg(
@@ -77,6 +88,31 @@ def legacy_keys_for_airport_leg(
     if direction is None:
         return frozenset()
     return frozenset((GEN_LEGACY_FADRIVE, str(fid), direction) for fid in byair_flight_ids)
+
+
+@dataclass(frozen=True)
+class HeldLeg:
+    """A leg that exists but could not be computed this sweep (#334).
+
+    `identity` and `kind` key it like a `DesiredBlock`, so its current blocks are
+    found and left untouched. `summary`, `when` (the leg's anchor) and `reason`
+    describe it for the operator when no block exists to hold. `announce` is
+    False for a hold that only keeps blocks in place (a meeting under way, a
+    local drive an outer leg may have absorbed, a flight byAir sent unreadable):
+    with no block it is not a drive the engine failed to plan, so it is never
+    reported missing.
+    """
+
+    identity: str
+    kind: str
+    summary: str
+    when: datetime | None
+    reason: str
+    announce: bool = True
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.identity, self.kind)
 
 
 @dataclass(frozen=True)
@@ -211,8 +247,9 @@ def material_update_delta(
 
 def _needs_update(current: ParsedBlock, desired: DesiredBlock) -> bool:
     """Whether a matched unified block differs from the desired leg on the fields
-    that drive a shift: anchor, endpoints, window, OR a MEANINGFUL change in the
-    routed drive duration (`baseline_seconds`). A real route-duration change
+    that drive a shift: anchor, endpoints, window, the operator display zone
+    (#309), OR a MEANINGFUL change in the routed drive duration
+    (`baseline_seconds`). A real route-duration change
     (traffic grew) moves the block's leave-by and must trigger an update; a
     sub-tolerance change is routing jitter, not signal, and is ignored so the
     live writer doesn't churn a recreate every sweep (#164)."""
@@ -221,6 +258,15 @@ def _needs_update(current: ParsedBlock, desired: DesiredBlock) -> bool:
         or current.origin != desired.origin
         or current.destination != desired.destination
         or current.window_end != desired.window_end
+    ):
+        return True
+    # A block displayed in a zone other than the operator's current one
+    # converges to it (#309). Only a zone the operator reader supplied counts,
+    # and only against a block whose own zone was read back.
+    if (
+        desired.zone_from_operator
+        and current.timezone is not None
+        and current.timezone != desired.timezone
     ):
         return True
     # A block whose baseline didn't parse can't be compared — re-shift it to a
@@ -232,20 +278,35 @@ def _needs_update(current: ParsedBlock, desired: DesiredBlock) -> bool:
     return drift >= _BASELINE_SHIFT_TOLERANCE_SECONDS
 
 
+def _done_by(block: ParsedBlock) -> datetime | None:
+    """When a block's drive is behind the operator: a transfer's at the end of
+    its window (its anchor is the landing that opens it), any other's at its
+    anchor."""
+    if block.kind == "airport_transfer" and block.window_end is not None:
+        return block.window_end
+    return block.anchor
+
+
 def plan_reconcile(
     desired: list[DesiredBlock],
     current: list[ParsedBlock],
     *,
     managed_legacy: frozenset[str] = _DEFAULT_MANAGED_LEGACY,
+    held: frozenset[tuple[str, str]] = frozenset(),
+    now: datetime | None = None,
 ) -> ReconcilePlan:
     """Diff desired legs against current calendar blocks (#156 G1 / G7 / R4).
 
     `managed_legacy` is the set of legacy generations the engine owns and may
-    converge or orphan-delete; blocks of any other legacy generation (e.g.
-    drive-planner meeting blocks while the engine has no meeting-leg source) are
-    left entirely untouched — never orphaned. Pure and deterministic: output
-    action lists are ordered by the desired-leg order then the current-block
-    order, with no clock or ambient state.
+    converge or orphan-delete; blocks of any other legacy generation are left
+    entirely untouched — never orphaned. `held` are the `(identity, kind)` keys
+    of legs that exist but could not be computed this sweep (`HeldLeg`): their
+    current unified blocks are neither updated nor deleted. With `now`, a
+    unified block whose drive is behind the operator (`_done_by`) is history
+    and is never orphan-deleted: a meeting that ended drops out of the calendar fetch, and
+    its drive stays where it happened. Pure and deterministic: output action
+    lists are ordered by the desired-leg order then the current-block order, and
+    the only clock is the `now` passed in.
     """
     creates: list[Create] = []
     updates: list[Update] = []
@@ -291,10 +352,14 @@ def plan_reconcile(
         else:
             creates.append(Create(d))
 
-    # Unified orphans: current unified blocks with no desired leg.
+    # Unified orphans: current unified blocks with no desired leg. A held leg
+    # still exists, so its blocks are not orphans (#334).
     for (identity, kind), blocks in unified_by_key.items():
-        if (identity, kind) not in desired_keys:
+        if (identity, kind) not in desired_keys and (identity, kind) not in held:
             for block in blocks:
+                done_by = _done_by(block)
+                if now is not None and done_by is not None and done_by < now:
+                    continue  # history, not an orphan
                 deletes.append(Delete(block.event_id, "orphan: no desired leg"))
 
     # Legacy orphans: any legacy block not consumed by a convert.

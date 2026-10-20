@@ -11,7 +11,7 @@ Fixed summaries and fixed dates only; the function is pure with no clock.
 from __future__ import annotations
 
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import pytest
@@ -45,7 +45,7 @@ def test_timed_start_reads_only_the_date_part():
 
 @pytest.mark.parametrize(
     "start",
-    ["2026-08-14", date(2026, 8, 14), datetime(2026, 8, 14, 20, 0, tzinfo=timezone.utc)],
+    ["2026-08-14", date(2026, 8, 14), datetime(2026, 8, 14, 20, 0, tzinfo=UTC)],
     ids=["iso-string", "date", "datetime"],
 )
 def test_accepts_every_start_shape_its_callers_hold(start):

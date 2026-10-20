@@ -30,19 +30,24 @@ import json
 import sys
 import traceback
 import urllib.error
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 _BUNDLE_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_BUNDLE_DIR))
 
-from byair_client import ByAirClient, ByAirError  # noqa: E402
+from byair_client import _MALFORMED_REMEDY, ByAirClient, ByAirError  # noqa: E402
 from state import (  # noqa: E402
+    SYNC_HEALTH_FILE,
+    StateError,
     delete_flight_state,
     read_active_flights,
     read_flight_state,
+    read_sync_health,
+    state_dir,
     write_active_flights,
     write_flight_state,
+    write_sync_health,
 )
 
 # Per-call timeout for the byAir HTTP client below. `ByAirClient`'s own
@@ -61,20 +66,42 @@ from state import (  # noqa: E402
 # the precheck path. Per #212; same inner-vs-outer collision as #28.
 _BYAIR_CALL_TIMEOUT_SECONDS = 20.0
 
+# Consecutive failed sync passes before the outage alert fires (#326). On a
+# flight day the gate syncs every 5 min, so 3 is 15 min of silence; between
+# trips the gate syncs about every 6 h. One alert per failure run, plus one
+# recovery notice when a pass succeeds after an alert.
+_OUTAGE_ALERT_THRESHOLD = 3
+
 
 def main() -> int:
-    # outer-boundary-process-contract: same shape as precheck.py.
-    # The scheduled task reads non-zero exit OR invalid stdout as
-    # "skip waking the agent". A bare programming bug bubbling out
-    # would silently disable the wake contract for every subsequent
-    # run; catch it here, emit safe-shape JSON, return 0.
     try:
-        diff = _run_sync(now_utc=datetime.now(timezone.utc))
+        diff = _run_sync(now_utc=datetime.now(UTC))
+        _attach_sync_health(diff, internal_error=None)
         _emit_diff(diff)
+        _commit_sync_health(diff)
         return 0
-    except Exception:  # noqa: BLE001 — outer-boundary-process-contract
+    # outer-boundary-process-contract: the scheduled task reads a non-zero
+    # exit OR invalid stdout as "skip waking the agent", silently. This
+    # handler emits the safe-shape `sync_exception` JSON (plus the internal
+    # failure count) and exits 0; letting the exception propagate would
+    # break that stdout contract and disable every later wake decision.
+    except Exception as exc:  # noqa: BLE001 — outer-boundary-process-contract
         traceback.print_exc(file=sys.stderr)
-        _emit_diff({"added": [], "removed": [], "error": "sync_exception"})
+        diff = {"added": [], "removed": [], "error": "sync_exception"}
+        # A local fault (config, state, bug) is not a byAir outage: it runs
+        # its own counter and alert, and leaves the byAir counter alone (#326).
+        try:
+            _attach_sync_health(diff, internal_error=type(exc).__name__)
+        # outer-boundary-process-contract: the same caller reads a non-zero
+        # exit or invalid stdout as "skip waking the agent", silently. A
+        # defect in the health bookkeeping is printed and reported as
+        # `health_error`; letting it escape this handler would skip
+        # `_emit_diff` and break that stdout contract.
+        except Exception as health_exc:  # noqa: BLE001 — outer-boundary-process-contract
+            traceback.print_exc(file=sys.stderr)
+            diff["health_error"] = type(health_exc).__name__
+        _emit_diff(diff)
+        _commit_sync_health(diff)
         return 0
 
 
@@ -112,11 +139,133 @@ def _emit_diff(diff: dict) -> None:
                 },
             }
         )
+    for source_event in diff.get("source_events", []) or []:
+        # Source-level events concern byAir itself, not one flight.
+        events.append({"flight_id": None, "event": source_event})
     has_events = bool(events)
     payload = {"wake_agent": has_events, "data": {"events": events}}
     if "error" in diff:
         payload["data"]["error"] = diff["error"]
-    print(json.dumps(payload, separators=(",", ":")))
+    if "health_error" in diff:
+        payload["data"]["health_error"] = diff["health_error"]
+    # Flushed here so a closed stdout fails before `_commit_sync_health`
+    # records the events as sent.
+    print(json.dumps(payload, separators=(",", ":")), flush=True)
+
+
+_HEALTH_REMEDY = (
+    "check that file's permissions and the disk's free space; if it is from a newer "
+    "flight-assist, upgrade nanoclaw-travel (never delete it: it holds the alert gate); "
+    "only a corrupt file may be removed to restart the counts"
+)
+
+
+def _attach_sync_health(diff: dict, *, internal_error: str | None) -> None:
+    """Plan this pass's sync-health transition; attach the resulting events.
+
+    The counters are bookkeeping beside the sync, never a gate on it: by now
+    the active-flights index may already hold this pass's changes, so a
+    failed health read must not cost the diff its added/removed events. The
+    failure is reported on stderr and as `health_error` in the payload
+    instead. The new record waits in the diff for `_commit_sync_health`,
+    which runs only after the events are on stdout.
+    """
+    byair_error = None if internal_error is not None else diff.get("error")
+    try:
+        diff["source_events"], diff["_health_record"] = _plan_sync_health(
+            byair_error=byair_error, internal_error=internal_error
+        )
+    except (StateError, OSError, ValueError) as health_err:
+        print(
+            f"flight-assist sync: health counter in {state_dir() / SYNC_HEALTH_FILE} not read "
+            f"({health_err}) — {_HEALTH_REMEDY}",
+            file=sys.stderr,
+        )
+        diff["health_error"] = type(health_err).__name__
+
+
+def _commit_sync_health(diff: dict) -> None:
+    """Persist the planned record once its events have been emitted.
+
+    `alerted` means the alert went out, so a pass that never emitted leaves
+    the gate as it was and the next pass re-derives the same events. A
+    failed write after emission repeats them next pass instead: the alerts
+    are at-least-once, never lost.
+    """
+    record = diff.get("_health_record")
+    if record is None:
+        return
+    try:
+        write_sync_health(record)
+    except (StateError, OSError, ValueError) as health_err:
+        print(
+            f"flight-assist sync: health counter in {state_dir() / SYNC_HEALTH_FILE} not updated "
+            f"({health_err}); this pass's source events will repeat — {_HEALTH_REMEDY}",
+            file=sys.stderr,
+        )
+
+
+def _advance(
+    record: dict,
+    keys: tuple[str, str, str],
+    error: str | None,
+    reasons: tuple[str, str],
+) -> list[dict]:
+    """Advance one failure run in `record` in place; return its events.
+
+    A failure increments the count and returns the alert event once the
+    count reaches `_OUTAGE_ALERT_THRESHOLD` with no alert sent yet for this
+    run. A success resets the run and returns the recovery event when an
+    alert had gone out.
+    """
+    count_key, alerted_key, error_key = keys
+    alert_reason, recovered_reason = reasons
+    if error is not None:
+        record[count_key] += 1
+        record[error_key] = error
+        if record[count_key] >= _OUTAGE_ALERT_THRESHOLD and not record[alerted_key]:
+            record[alerted_key] = True
+            return [
+                {"reason": alert_reason, "consecutive_failures": record[count_key], "error": error}
+            ]
+        return []
+    events = []
+    if record[alerted_key]:
+        events.append({"reason": recovered_reason, "failures_before_recovery": record[count_key]})
+    record.update({count_key: 0, alerted_key: False, error_key: None})
+    return events
+
+
+def _plan_sync_health(
+    *, byair_error: str | None, internal_error: str | None
+) -> tuple[list[dict], dict | None]:
+    """Advance both failure runs for this pass, without writing.
+
+    Returns the source-level events and the record to persist once they are
+    emitted, or None when the record is unchanged.
+
+    A pass that died on a local fault advances the internal run and leaves
+    the byAir run untouched (byAir was never asked). A pass that produced a
+    result clears the internal run and advances the byAir run by its
+    outcome. Before #326 a failed pass looked exactly like a quiet one, and
+    897 consecutive failures raised nothing.
+    """
+    health = read_sync_health()
+    record = dict(health)
+    events = _advance(
+        record,
+        ("internal_failures", "internal_alerted", "last_internal_error"),
+        internal_error,
+        ("sync_internal_error", "sync_internal_recovered"),
+    )
+    if internal_error is None:
+        events += _advance(
+            record,
+            ("consecutive_failures", "alerted", "last_error"),
+            byair_error,
+            ("byair_unreachable", "byair_recovered"),
+        )
+    return events, (record if record != health else None)
 
 
 def _run_sync(*, now_utc: datetime) -> dict:
@@ -146,18 +295,46 @@ def _run_sync(*, now_utc: datetime) -> dict:
         )
         return {"added": [], "removed": [], "error": byair_err.error_type}
 
-    upstream_flights = _extract_flights(trips_payload)
+    try:
+        upstream_flights = _extract_flights(trips_payload)
+    except ByAirError as byair_err:
+        # A reply byAir sent in the wrong shape is a byAir failure, not a
+        # local fault: it counts toward byair_unreachable (#326).
+        print(f"flight-assist sync: byair error: {byair_err}", file=sys.stderr)
+        return {"added": [], "removed": [], "error": byair_err.error_type}
     return _reconcile_active_flights(upstream_flights, now_utc=now_utc)
 
 
-def _extract_flights(trips_payload: dict) -> list[dict]:
-    """Pull every flight dict out of the trips response into a flat list."""
+def _extract_flights(trips_payload: object) -> list[dict]:
+    """Pull every flight dict out of the trips response into a flat list.
+
+    Raises `ByAirError("malformed_response")` unless byAir's reply has the
+    documented shape: an explicit `trips` list, each trip an object with an
+    explicit `flights` list, each flight an object with an int `id`. A
+    missing collection must never read as "no flights", which would make
+    reconciliation untrack every active flight.
+    """
+    trips = trips_payload.get("trips") if isinstance(trips_payload, dict) else None
+    if not isinstance(trips, list):
+        raise ByAirError(
+            "malformed_response", "list_trips reply has no `trips` list" + _MALFORMED_REMEDY
+        )
     flights: list[dict] = []
-    for trip in trips_payload.get("trips", []) or []:
-        for flight in trip.get("flights", []) or []:
+    for trip in trips:
+        trip_flights = trip.get("flights") if isinstance(trip, dict) else None
+        if not isinstance(trip_flights, list):
+            raise ByAirError(
+                "malformed_response", "list_trips trip has no `flights` list" + _MALFORMED_REMEDY
+            )
+        for flight in trip_flights:
+            flight_id = flight.get("id") if isinstance(flight, dict) else None
+            if not isinstance(flight_id, int) or isinstance(flight_id, bool):
+                raise ByAirError(
+                    "malformed_response",
+                    "list_trips flight has no integer `id`" + _MALFORMED_REMEDY,
+                )
             # Carry the trip_id into the flight dict so the writer has it.
-            flight = {**flight, "_trip_id": trip.get("id")}
-            flights.append(flight)
+            flights.append({**flight, "_trip_id": trip.get("id")})
     return flights
 
 

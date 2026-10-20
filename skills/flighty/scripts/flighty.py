@@ -11,7 +11,7 @@ import unicodedata
 import uuid
 from collections import Counter
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -26,11 +26,11 @@ class FlightyError(Exception):
 def instant(value):
     """Date-only and naive ISO values are UTC, never host-local time."""
     parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return int(parsed.replace(tzinfo=parsed.tzinfo or timezone.utc).timestamp())
+    return int(parsed.replace(tzinfo=parsed.tzinfo or UTC).timestamp())
 
 
 def iso(value):
-    return datetime.fromtimestamp(value, timezone.utc).isoformat() if value is not None else None
+    return datetime.fromtimestamp(value, UTC).isoformat() if value is not None else None
 
 
 def fold(value):
@@ -583,7 +583,7 @@ def main(argv=None):
     db = None
     try:
         args = parser().parse_args(argv)
-        now = instant(args.now) if args.now else int(datetime.now(timezone.utc).timestamp())
+        now = instant(args.now) if args.now else int(datetime.now(UTC).timestamp())
         if getattr(args, "year", None) is not None and not 1 <= args.year <= 9998:
             raise FlightyError("--year must be between 1 and 9998.")
         db = Database(args.db, args.user_id, now, getattr(args, "write", False))

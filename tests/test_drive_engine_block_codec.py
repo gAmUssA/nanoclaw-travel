@@ -10,7 +10,7 @@ unmarked events.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -32,7 +32,7 @@ from chain import LegKind, PlannedLeg  # noqa: E402
 from flight_identity import MergedFlight  # noqa: E402
 from leg_anchor import AirportFacts, resolve_leg_anchor  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _dt(h, mi=0, *, day=12):
@@ -117,6 +117,41 @@ def test_extended_properties_build_parse_round_trip():
     assert parsed.origin == "Hotel X"
     assert parsed.destination == "BNA"
     assert parsed.alerted == frozenset({ALERT_GROWTH})
+
+
+def test_unified_block_carries_its_start_timezone():
+    """#309: reconcile compares the block's display zone to the operator's, so
+    the reader keeps the event's own `start.timeZone`."""
+    ext = build_extended_properties(
+        identity="mtg1",
+        kind="meeting_outbound",
+        baseline_seconds=1500,
+        anchor=_dt(8, 0),
+        origin="Home",
+        destination="Clinic",
+    )
+    event = {
+        "id": "evt1",
+        "start": {"dateTime": "2020-07-12T10:00:00+02:00", "timeZone": "Etc/GMT-2"},
+        **ext_event(ext),
+    }
+    parsed = parse_block(event)
+    assert parsed is not None
+    assert parsed.timezone == "Etc/GMT-2"
+
+
+def test_unified_block_without_a_start_timezone_reads_none():
+    ext = build_extended_properties(
+        identity="mtg1",
+        kind="meeting_outbound",
+        baseline_seconds=1500,
+        anchor=_dt(8, 0),
+        origin="Home",
+        destination="Clinic",
+    )
+    parsed = parse_block({"id": "evt1", "start": {"dateTime": "x"}, **ext_event(ext)})
+    assert parsed is not None
+    assert parsed.timezone is None
 
 
 def test_extended_properties_values_are_all_strings():

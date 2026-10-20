@@ -1,6 +1,6 @@
 # Precheck Wake Event Payloads
 
-Reference for the `data.events` payload the precheck script emits on `wake_agent: true`. Each event is `{"flight_id": int, "event": {...}}`. Consumed by `SKILL.md` Step 3 to compose user-facing notifications.
+Reference for the `data.events` payload the precheck script emits on `wake_agent: true`. Each event is `{"flight_id": int | null, "event": {...}}`. `flight_id` is `null` only for the source-level events (`byair_unreachable`, `byair_recovered`, `sync_internal_error`, `sync_internal_recovered`). Consumed by `SKILL.md` Step 3 to compose user-facing notifications.
 
 ## Event Reasons
 
@@ -61,7 +61,7 @@ Same trigger as `cancelled` but for `diverted` status.
 {"reason": "boarding_started"}
 ```
 
-Fires on transition into actual boarding, gated on the real-boarding signal rather than the `computed_status` label alone — byAir labels the phase `boarding` before boarding starts. First-cycle "already boarding" does not fire. The `phase_markers.boarding_fired` flag is reserved for a future boarding-prep notification and does not gate this event in v0.1. Firing conditions and the real-boarding predicate live in `wake_rules.py` (`detect_wake_events`, `is_real_boarding`).
+Fires on transition into actual boarding, gated on the real-boarding signal rather than the `computed_status` label alone — byAir labels the phase `boarding` before boarding starts. The real-boarding predicate is also held against flight-assist's own planned boarding window, the one its boarding block uses (#295), each snapshot judged at its own poll instant. First-cycle "already boarding" does not fire. The `phase_markers.boarding_fired` flag is reserved for a future boarding-prep notification and does not gate this event in v0.1. Firing conditions and the real-boarding predicate live in `wake_rules.py` (`detect_wake_events`, `is_real_boarding`); the window in `phase_markers.py` (`boarding_window_open`).
 
 #### `carousel_revealed`
 
@@ -106,10 +106,14 @@ Suppression rules:
 #### `day_before`
 
 ```json
-{"reason": "day_before", "scheduled_dep_time": "2026-05-18T17:00:00+00:00", "hours_until_dep": 24}
+{"reason": "day_before", "scheduled_dep_time": "2026-09-10T19:50:00-05:00", "hours_until_dep": 7, "day_label": "today", "day_label_tz": "America/Chicago"}
 ```
 
-Fires once per flight at `T - 24h`.
+Fires once per flight. The firing logic lives in `phase_markers.py` (`check_day_before`, `DAY_BEFORE_HOURS`); a flight first tracked late can fire the same local day.
+
+- `hours_until_dep` — the real whole hours from the poll to scheduled departure (24 at the exact threshold, 7 in the example); never the constant 24.
+- `day_label` — `today`, `tomorrow`, or a `YYYY-MM-DD` date, resolved by the precheck against the operator's local date through the core `current-tz` reader. Render it verbatim.
+- `day_label_tz` — the IANA zone the label was resolved in; `null` when no operator zone was available, in which case `day_label` is the explicit date `scheduled_dep_time` carries in its own offset.
 
 #### `time_to_leave`
 
@@ -145,7 +149,7 @@ Fires once per flight at `T-arr − 15min`.
 
 Fires when byAir returns 404 for a previously-tracked flight. The agent should surface this to the user (don't auto-delete state — let the user confirm).
 
-### Sync-driven (from `sync_tripit.py`)
+### Sync-driven (from `skills/flight-assist/sync_tripit.py`)
 
 The daily sync script also emits via the same `data.events` shape so SKILL.md's composition table has a single contract.
 
@@ -175,8 +179,45 @@ Fires when a flight appeared in `byair_list_trips` that wasn't on the active-fli
 
 Fires when a previously-tracked flight is no longer in `byair_list_trips` (e.g., the trip expired or the user untracked it upstream). The sync script deletes the per-flight state file — the event payload captures the prior-state metadata BEFORE the delete so the agent's composition template has `code` to render. Reading state by `flight_id` after this event arrives returns None (state already deleted).
 
+### Source-level (from `skills/flight-assist/sync_tripit.py`, #326)
+
+These concern byAir itself, so the wrapper carries `"flight_id": null`. There is no per-flight state to read for them.
+
+#### `byair_unreachable`
+
+```json
+{"reason": "byair_unreachable", "consecutive_failures": 3, "error": "session_missing"}
+```
+
+Fires once per failure run, when consecutive sync passes that reached byAir and failed hit the threshold (`_OUTAGE_ALERT_THRESHOLD` in `skills/flight-assist/sync_tripit.py`). `error` is the latest byAir error type (`transport_error`, `session_missing`, …). Until the sync recovers, new or changed trips do not reach the tracking index. Polling of already-tracked flights is separate; its failures show as `error: "byair_poll_failed"` in the flight-assist precheck payload.
+
+#### `byair_recovered`
+
+```json
+{"reason": "byair_recovered", "failures_before_recovery": 5}
+```
+
+Fires on the first clean sync pass after a `byair_unreachable` alert.
+
+#### `sync_internal_error`
+
+```json
+{"reason": "sync_internal_error", "consecutive_failures": 3, "error": "ValueError"}
+```
+
+Fires once per failure run, when consecutive passes that died on a local fault (configuration, state, or a bug) hit the same threshold. `error` is the exception class. The traceback is in the sync-tripit precheck's stderr in the host log. byAir itself is not implicated.
+
+#### `sync_internal_recovered`
+
+```json
+{"reason": "sync_internal_recovered", "failures_before_recovery": 4}
+```
+
+Fires on the first pass that produces a result after a `sync_internal_error` alert. It means the local fault cleared, nothing more: that same pass may still fail at byAir and advance the separate byAir run.
+
 ## Composition Discipline
 
-- One event = one notification line, unless multiple events for the same `flight_id` arrive in one cycle (then merge per the ordering rule in SKILL.md Step 3).
+- One event = one notification line, unless multiple events for the same non-null `flight_id` arrive in one cycle (then merge per the ordering rule in SKILL.md Step 3).
+- Source-level events (`flight_id: null`) are never merged, with each other or with flight events: each gets its own notification line.
 - Don't fabricate fields — every field above is OPTIONAL on the event dict except `reason`. Render `<missing>` or skip the substring rather than inventing a value.
 - Times in the event payload are in the airport's local timezone (RFC 3339 with offset) — display as-is per byAir's instructions block ("Times are in local airport timezone (RFC3339 with offset, e.g. +02:00). Show the time as-is — do not convert or add timezone abbreviations").

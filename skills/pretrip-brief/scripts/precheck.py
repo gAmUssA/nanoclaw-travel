@@ -8,7 +8,7 @@ import os
 import re
 import subprocess
 import tempfile
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -268,7 +268,7 @@ def main():
     parser.add_argument("--mark-sent", nargs="+")
     parser.add_argument("--message-id")
     args = parser.parse_args()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sent_path = GROUP / "pretrip-brief-sent.json"
     sent = json.loads(sent_path.read_text()) if sent_path.exists() else {}
     if args.mark_sent:

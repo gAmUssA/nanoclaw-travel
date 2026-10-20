@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -28,6 +28,7 @@ from scan import (  # noqa: E402
     TransitLeg,
     actionable,
     flight_codes,
+    same_place,
     scan,
 )
 
@@ -215,6 +216,47 @@ def test_lombot49_virtual_locations_are_filtered(location):
     )[0]
     assert result.bucket == "filtered"
     assert result.reason == "virtual location"
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "TLV-3-Board Room (20p) (20) [ZOOM]",
+        "Room 4.12 [TEAMS]",
+        "Boardroom [Meet]",
+        "HQ-2-Huddle [WEBEX]",
+    ],
+)
+def test_bracketed_room_conferencing_tag_is_virtual(location):
+    """#294: a video-wired room resource carries the platform in brackets and no
+    URL; it is a call, not a place to drive to."""
+    start = NOW + timedelta(hours=3)
+    result = scan(
+        [_meeting("m1", start=start, end=start + timedelta(hours=1), location=location)],
+        now=NOW,
+        home_address=HOME,
+    )[0]
+    assert result.bucket == "filtered"
+    assert result.reason == "virtual location"
+
+
+@pytest.mark.parametrize(
+    "location",
+    [
+        "Meeting Room 4, 1 Main St, Sampleton, TN",
+        "Zoomer's Cafe, 5 High St",
+    ],
+)
+def test_bare_platform_word_in_an_address_stays_routable(location):
+    """#294: only the bracketed tag is the signal — a real address that happens
+    to contain "meet" or "zoom" is still driven to."""
+    start = NOW + timedelta(hours=3)
+    result = scan(
+        [_meeting("m1", start=start, end=start + timedelta(hours=1), location=location)],
+        now=NOW,
+        home_address=HOME,
+    )[0]
+    assert result.bucket == "needs_decision"
 
 
 def test_missing_location_is_filtered():
@@ -421,10 +463,10 @@ def test_corrupted_duplicate_flight_still_filtered_by_summary():
     # two with a corrupted timezone whose span (19:55–22:01Z) ends before the
     # true flight window (22:59–01:46Z) starts. Signal 1 misses the corrupt
     # copies; the template summary (signal 2) catches all three.
-    good_start = datetime(2026, 7, 1, 22, 59, tzinfo=timezone.utc)
-    good_end = datetime(2026, 7, 2, 1, 46, tzinfo=timezone.utc)
-    bad_start = datetime(2026, 7, 1, 19, 55, tzinfo=timezone.utc)
-    bad_end = datetime(2026, 7, 1, 22, 1, tzinfo=timezone.utc)
+    good_start = datetime(2026, 7, 1, 22, 59, tzinfo=UTC)
+    good_end = datetime(2026, 7, 2, 1, 46, tzinfo=UTC)
+    bad_start = datetime(2026, 7, 1, 19, 55, tzinfo=UTC)
+    bad_end = datetime(2026, 7, 1, 22, 1, tzinfo=UTC)
     events = [
         _meeting(
             "good",
@@ -912,6 +954,98 @@ def test_default_anchor_is_home():
     results = scan([event], now=NOW, home_address=HOME)
     assert results[0].legs[0].origin == HOME
     assert results[0].legs[-1].destination == HOME
+
+
+# ---------------------------------------------------------------------------
+# A meeting AT the anchor — held at home, or at the trip lodging (#301)
+# ---------------------------------------------------------------------------
+
+
+def test_meeting_at_home_is_filtered_with_no_legs():
+    """The #301 symptom: an appointment whose location IS `current_home` drew
+    two degenerate home→home drive blocks. There is nowhere to drive."""
+    start = NOW + timedelta(hours=3)
+    event = _meeting("evt_home", start=start, end=start + timedelta(hours=1), location=HOME)
+    [result] = scan([event], now=NOW, home_address=HOME)
+    assert result.bucket == "filtered"
+    assert "anchor" in result.reason
+    assert result.legs == ()
+
+
+def test_meeting_at_home_matches_case_and_whitespace_insensitively():
+    """Same deterministic equality as the neighbour rule — no geocode."""
+    start = NOW + timedelta(hours=3)
+    event = _meeting(
+        "evt_home",
+        start=start,
+        end=start + timedelta(hours=1),
+        location="  12 example st,\n Sampleton,   TN 37000 ",
+    )
+    [result] = scan([event], now=NOW, home_address=HOME)
+    assert result.bucket == "filtered"
+    assert result.legs == ()
+
+
+@pytest.mark.parametrize(
+    ("a", "b", "same"),
+    [
+        ("12 Example St, Sampleton", "  12 example st,\n Sampleton ", True),
+        ("12 Example St", "14 Example St", False),
+        ("12 Example St", None, False),
+        (None, None, False),
+    ],
+)
+def test_same_place_normalizes_both_sides(a, b, same):
+    assert same_place(a, b) is same
+
+
+def test_meeting_at_the_lodging_is_filtered_on_a_trip():
+    """On a trip the anchor is the current lodging; a meeting held there is the
+    same nowhere-to-drive case."""
+    start = NOW + timedelta(days=1)
+    event = _meeting("evt_hotel", start=start, end=start + timedelta(hours=1), location=LODGING)
+    [result] = scan([event], now=NOW, home_address=HOME, anchor_for=lambda _at: (LODGING, None))
+    assert result.bucket == "filtered"
+    assert "anchor" in result.reason
+    assert result.legs == ()
+
+
+def test_meeting_at_home_does_not_disturb_a_later_meeting_elsewhere():
+    """A home appointment followed 30 min later by a real meeting: the real
+    meeting still drives out from home, the home one stays filtered."""
+    home_start = NOW + timedelta(hours=3)
+    away_start = home_start + timedelta(hours=1, minutes=30)  # 30-min gap: tight
+    events = [
+        _meeting("evt_home", start=home_start, end=home_start + timedelta(hours=1), location=HOME),
+        _meeting("evt_away", start=away_start, end=away_start + timedelta(hours=1)),
+    ]
+    by_id = _by_id(scan(events, now=NOW, home_address=HOME))
+    assert by_id["evt_home"].bucket == "filtered"
+    assert by_id["evt_away"].bucket == "needs_decision"
+    assert [leg.direction for leg in by_id["evt_away"].legs] == ["outbound", "return"]
+    assert by_id["evt_away"].legs[0].origin == HOME
+
+
+def test_meeting_at_home_is_not_a_tight_gap_neighbour():
+    """A venue meeting ending 14:00 then a home appointment at 14:30: the venue
+    meeting keeps its own return leg home. Before #301 the home event acted as
+    a tight-gap neighbour — the return was dropped and the drive home became a
+    "bridge" to an appointment at the house."""
+    venue_start = NOW + timedelta(hours=3)
+    venue_end = venue_start + timedelta(hours=1)
+    home_start = venue_end + timedelta(minutes=30)  # tight
+    events = [
+        _meeting("evt_venue", start=venue_start, end=venue_end),
+        _meeting("evt_home", start=home_start, end=home_start + timedelta(hours=1), location=HOME),
+    ]
+    by_id = _by_id(scan(events, now=NOW, home_address=HOME))
+    assert by_id["evt_venue"].bucket == "needs_decision"
+    directions = [leg.direction for leg in by_id["evt_venue"].legs]
+    assert directions == ["outbound", "return"]
+    ret = by_id["evt_venue"].legs[1]
+    assert ret.destination == HOME
+    assert by_id["evt_home"].bucket == "filtered"
+    assert by_id["evt_home"].legs == ()
 
 
 # --- #284: a declared timeZone that contradicts its own dateTime offset ----

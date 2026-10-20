@@ -21,9 +21,9 @@ file's mtime via `os.utime` relative to it.
 
 import json
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
-_NOW = datetime(2026, 5, 31, 6, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 5, 31, 6, 0, 0, tzinfo=UTC)
 
 
 def _write_db(path, schema_version: int | None = 3):
