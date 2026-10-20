@@ -23,9 +23,9 @@ State file (see `state-schema.md`):
     {"schema_version": 2, "airports": {"<airport_id>": {"iata","flag","tz","lat","lon"}}}
 
 Version 2 adds the coordinates the drive engine routes an airport by (#334).
-This module owns the file: a version-1 file reads as version 2 with no
-coordinates, the sweep refetches each such airport once, and the next write is
-version 2.
+This module owns the file: a version-1 file is read as version 2 with no
+coordinates and rewritten as version 2 on that read; the sweep then refetches
+each airport without coordinates once.
 
 stdlib-only per `coding-policy: dependency-management` (Stdlib First).
 
@@ -162,7 +162,23 @@ def load_static_facts() -> dict[int, StaticAirport]:
             lat=_coordinate(entry.get("lat"), 90.0),
             lon=_coordinate(entry.get("lon"), 180.0),
         )
+    if version in _MIGRATABLE_VERSIONS:
+        _upgrade(facts, version)
     return facts
+
+
+def _upgrade(facts: dict[int, StaticAirport], version: object) -> None:
+    """Rewrite an older file at AIRPORT_FACTS_SCHEMA_VERSION, the owner's
+    migration on read. A failed write leaves the older file for the next read
+    and says so on stderr; the facts read from it are still returned."""
+    try:
+        store_static_facts(facts)
+    except OSError as exc:
+        print(
+            f"[drive-engine] airport-facts cache v{version} could not be rewritten as "
+            f"v{AIRPORT_FACTS_SCHEMA_VERSION} ({exc}); it is read as is and migrated next time",
+            file=sys.stderr,
+        )
 
 
 def _coordinate(value: object, limit: float) -> float | None:

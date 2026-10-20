@@ -662,35 +662,42 @@ def lodging_desired_blocks(
             HeldLeg(identity=trip.key, kind=kind, summary=summary, when=when, reason=reason)
         )
 
+    def hold_trip(trip: DriveTrip, reason: str) -> None:
+        """Hold both legs of a trip that could not be planned at all, unless the
+        operator said it is flown: a flown trip has no drive to keep."""
+        recorded = verdicts.get(trip.key)
+        if recorded is not None and recorded.is_operator_answer and recorded.verdict == VERDICT_FLY:
+            skipped.append(f"{reason} — flying, nothing held")
+            return
+        skipped.append(reason)
+        held.append(
+            HeldLeg(
+                identity=trip.key,
+                kind=KIND_OUTBOUND,
+                summary=f"Drive: home → {trip.hotel}",
+                when=trip.check_in,
+                reason=reason,
+            )
+        )
+        held.append(
+            HeldLeg(
+                identity=trip.key,
+                kind=KIND_RETURN,
+                summary=f"Drive: {trip.hotel} → home",
+                when=trip.check_out,
+                reason=reason,
+            )
+        )
+
     if home_address is None:
         for trip in trips:
-            reason = f"lodging {trip.key}: no home address configured — unplanned"
-            hold(trip, KIND_OUTBOUND, trip.check_in, reason)
-            held.append(
-                HeldLeg(
-                    identity=trip.key,
-                    kind=KIND_RETURN,
-                    summary=f"Drive: {trip.hotel} → home",
-                    when=trip.check_out,
-                    reason=reason,
-                )
-            )
+            hold_trip(trip, f"lodging {trip.key}: no home address configured — unplanned")
         return blocks, skipped, plans, held
 
     for trip in trips:
         outbound_drive = route(home_address, trip.address)
         if outbound_drive is None:
-            reason = f"lodging {trip.key}: home→lodging route failed"
-            hold(trip, KIND_OUTBOUND, trip.check_in, reason)
-            held.append(
-                HeldLeg(
-                    identity=trip.key,
-                    kind=KIND_RETURN,
-                    summary=f"Drive: {trip.hotel} → home",
-                    when=trip.check_out,
-                    reason=reason,
-                )
-            )
+            hold_trip(trip, f"lodging {trip.key}: home→lodging route failed")
             continue
 
         band = classify_drive(outbound_drive)

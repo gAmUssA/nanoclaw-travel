@@ -42,7 +42,7 @@ from reconcile import DesiredBlock, HeldLeg, plan_reconcile  # noqa: E402
 from scan import MeetingClass, TransitLeg  # noqa: E402
 
 HOME = "12 Example St, TN"
-NOW = datetime(2026, 10, 19, 20, 30, tzinfo=UTC)
+NOW = datetime(2025, 10, 19, 20, 30, tzinfo=UTC)
 US = "🇺🇸"
 
 
@@ -50,8 +50,8 @@ def _flight(dep="BNA", arr="SFO", *, fid=1, day=22):
     return Flight(
         dep_airport=dep,
         arr_airport=arr,
-        scheduled_dep=datetime(2026, 10, day, 15, 0, tzinfo=UTC),
-        scheduled_arr=datetime(2026, 10, day, 19, 0, tzinfo=UTC),
+        scheduled_dep=datetime(2025, 10, day, 15, 0, tzinfo=UTC),
+        scheduled_arr=datetime(2025, 10, day, 19, 0, tzinfo=UTC),
         source=BYAIR,
         byair_flight_id=fid,
     )
@@ -126,7 +126,7 @@ def test_an_implausible_drive_keeps_the_existing_block():
 
 def test_a_past_leg_keeps_its_block():
     dep = _identity_of("airport_departure")
-    after = datetime(2026, 10, 23, tzinfo=UTC)
+    after = datetime(2025, 10, 23, tzinfo=UTC)
     result = _plan(
         lambda o, d: timedelta(minutes=40), current=[_block(dep, "airport_departure")], now=after
     )
@@ -293,7 +293,7 @@ def state_dir(tmp_path, monkeypatch):
     return tmp_path
 
 
-def _held(when=NOW + timedelta(days=13), identity="BNA-LGA-20261102T1840Z"):
+def _held(when=NOW + timedelta(days=13), identity="BNA-LGA-20251102T1840Z"):
     return HeldLeg(
         identity=identity,
         kind="airport_departure",
@@ -343,9 +343,9 @@ def test_only_held_legs_without_a_block_are_missing():
 
 def test_the_notice_line_reads_in_the_operator_zone():
     line = reconcile_sweep._unplanned_line(
-        _held(when=datetime(2026, 11, 2, 17, 40, tzinfo=UTC)), "America/Chicago"
+        _held(when=datetime(2025, 11, 2, 17, 40, tzinfo=UTC)), "America/Chicago"
     )
-    assert line == "Couldn't plan Drive: → BNA (Mon Nov 02, 11:40): route failed"
+    assert line == "Couldn't plan Drive: → BNA (Sun Nov 02, 11:40): route failed"
 
 
 def test_unplanned_lines_reach_the_rendered_notice():
@@ -388,3 +388,70 @@ def test_desired_block_type_is_unchanged_by_a_hold():
     )
     plan = plan_reconcile([block], [], held=frozenset({("a", "airport_departure")}))
     assert len(plan.creates) == 1
+
+
+def test_a_flown_trip_holds_nothing_when_it_cannot_be_planned():
+    """An operator `fly` answer means no drive exists to keep."""
+    from drive_decision import TripVerdict
+
+    flown = {
+        "trip-1": TripVerdict(
+            verdict="fly",
+            decided_by="operator",
+            drive_seconds=None,
+            asked_at=None,
+            expires=NOW + timedelta(days=10),
+        )
+    }
+    for home in (None, HOME):
+        _blocks, skipped, _plans, held = lodging_desired_blocks(
+            [_trip()], route=lambda o, d: None, home_address=home, verdicts=flown, now=NOW
+        )
+        assert held == [] and "flying, nothing held" in skipped[0]
+
+
+def test_a_shadow_sweep_records_no_notice(state_dir, monkeypatch):
+    monkeypatch.setenv("DRIVE_ENGINE_SHADOW", "1")
+    leg = _held()
+    for minutes in (0, 60):
+        payload = reconcile_sweep.finish_sweep(
+            reconcile_sweep.ReconcilePlan(),
+            [],
+            calendar=None,
+            apply=lambda *a, **k: pytest.fail("a shadow sweep applied"),
+            held=(leg,),
+            current_blocks=[],
+            now=NOW + timedelta(minutes=minutes),
+        )
+        assert payload["data"]["shadow"] is True
+    assert not (state_dir / "unplanned-notices.json").exists()
+
+
+def test_a_live_sweep_announces_a_drive_missing_for_an_hour(state_dir, monkeypatch):
+    monkeypatch.delenv("DRIVE_ENGINE_SHADOW", raising=False)
+    applied = types.SimpleNamespace(
+        added_meeting_legs=[],
+        material_updates=[],
+        created=0,
+        updated=0,
+        deleted=0,
+        converted=0,
+        deferred=0,
+        errors=[],
+    )
+    leg = _held()
+    messages = [
+        reconcile_sweep.finish_sweep(
+            reconcile_sweep.ReconcilePlan(),
+            [],
+            calendar=None,
+            apply=lambda *a, **k: applied,
+            held=(leg,),
+            current_blocks=[],
+            display_zone="America/Chicago",
+            now=NOW + timedelta(minutes=minutes),
+        )["data"]["message"]
+        for minutes in (0, 60)
+    ]
+    assert messages[0] is None
+    assert messages[1] is not None and messages[1].startswith("Couldn't plan Drive: → BNA")

@@ -91,6 +91,9 @@ def test_a_version_1_file_reads_without_coordinates(facts_env):
     )
     fact = load_static_facts()[3]
     assert (fact.iata, fact.timezone, fact.has_coordinates) == ("JFK", "America/New_York", False)
+    rewritten = json.loads(facts_env.read_text(encoding="utf-8"))
+    assert rewritten["schema_version"] == 2
+    assert rewritten["airports"]["3"]["iata"] == "JFK"
 
 
 @pytest.mark.parametrize("lat", [91, "40.6", True, float("nan")])

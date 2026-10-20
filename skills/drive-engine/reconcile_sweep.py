@@ -545,7 +545,9 @@ def finish_sweep(
     calendar,
     apply: Callable = apply_plan,
     drive_or_fly_questions: list[str] | None = None,
-    unplanned: list[str] | None = None,
+    held: tuple[HeldLeg, ...] = (),
+    current_blocks: list[ParsedBlock] | None = None,
+    display_zone: str | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Shadow-render or apply the plan, and return the sweep's stdout payload.
@@ -568,7 +570,11 @@ def finish_sweep(
     horizon is measured against the same instant the plan was built from rather
     than a second clock read at write time — the "which `now` did the caller
     pass" scatter #154 was root-caused to. Omitted, `apply_plan` reads the real
-    clock."""
+    clock.
+
+    `held` and `current_blocks` feed the unplanned-drive notices (#334). They
+    are chosen, and their state recorded, only on the LIVE path, after the
+    shadow return: a dry run must not mark a notice sent that it never sent."""
     if _shadow_mode():
         print(render_plan(plan), file=sys.stderr)
         for line in skipped:
@@ -588,7 +594,9 @@ def finish_sweep(
     for line in applied.errors:
         print(f"[drive-engine] error: {line}", file=sys.stderr)
 
-    return build_sweep_payload(applied, skipped, drive_or_fly_questions, unplanned)
+    unplanned = _unplanned_notices(held, current_blocks or [], now=now or datetime.now(UTC))
+    lines = [_unplanned_line(leg, display_zone) for leg in unplanned]
+    return build_sweep_payload(applied, skipped, drive_or_fly_questions, lines)
 
 
 class _AirportCtx(Protocol):
@@ -1182,7 +1190,6 @@ def _run_sweep() -> dict:
     )
 
     skipped = list(result.skipped) + list(meeting_skipped) + list(lodging_skipped)
-    unplanned = _unplanned_notices(result.held, current_blocks, now=now)
 
     # Persist any newly-resolved static airport facts for the next warm sweep —
     # best-effort, never a gate on applying a valid plan (see helper).
@@ -1194,7 +1201,9 @@ def _run_sweep() -> dict:
         skipped,
         calendar=calendar,
         drive_or_fly_questions=drive_or_fly_questions,
-        unplanned=[_unplanned_line(leg, operator_zone) for leg in unplanned],
+        held=result.held,
+        current_blocks=current_blocks,
+        display_zone=operator_zone,
         now=now,
     )
 
