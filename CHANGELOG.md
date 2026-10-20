@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.2.153 — 2026-10-20
+
 ### drive-engine — a leg it cannot compute keeps its block; airports route by coordinates (#334)
 
 On 2026-10-19 Google Distance Matrix failed for a few minutes around the 20:30Z sweep and the router fell back to TomTom, which geocoded the engine's "SFO airport", "SAT airport" and "BNA airport" as the town of Airport, MO. Legs over the 6-hour cap were skipped, a skipped leg dropped out of the desired set, and the reconcile orphan-deleted 13 correct blocks; home↔BNA legs routed to Missouri came in under the cap and rewrote all six existing blocks to 5-hour drives. The next sweep, with Google back, restored everything and announced the re-created meeting drives as new.
