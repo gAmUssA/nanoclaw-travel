@@ -11,14 +11,14 @@ the next sweep and is not worth a message) and only once per spell: an entry
 that plans again is forgotten, so a later failure is news again. Only legs due
 within `NOTICE_HORIZON` count; a drive months out has time to resolve itself.
 
-Hint, not authority (`coding-policy: stateful-artifacts`): a missing,
-unreadable or older-version file reads as "nothing noticed yet", with a stderr
-diagnostic for anything but a plain missing file. The cost is one repeated
-notice, never a missed drive. A file of a newer version is no usable prior
-state too, but belongs to a newer engine and is never written: read as
-nothing noticed yet each sweep, no leg outlasts `PERSIST_BEFORE_NOTICE`, so no
-notice goes out (never one per sweep) until this reader is updated. Schema in
-`state-schema.md`.
+Each schema version keeps its own file (`unplanned-notices.v<N>.json`), so
+engines of different versions never read or write each other's record: after
+an upgrade or a rollback the running engine starts or resumes its own, and
+the cost is at most one repeated notice. Hint, not authority
+(`coding-policy: stateful-artifacts`): a missing, unreadable or malformed file
+reads as "nothing noticed yet", with a stderr diagnostic for anything but a
+plain missing file. The cost is one repeated notice, never a missed drive.
+Schema in `state-schema.md`.
 """
 
 from __future__ import annotations
@@ -34,11 +34,12 @@ _BUNDLE_DIR = Path(__file__).resolve().parent
 if str(_BUNDLE_DIR) not in sys.path:
     sys.path.insert(0, str(_BUNDLE_DIR))
 
+# E402: these bundle-local imports resolve only after the sys.path insert above.
 from reconcile import HeldLeg  # noqa: E402
 from skip_state import state_dir  # noqa: E402
 
 NOTICES_SCHEMA_VERSION = 1
-_NOTICES_FILE = "unplanned-notices.json"
+_NOTICES_FILE = f"unplanned-notices.v{NOTICES_SCHEMA_VERSION}.json"
 
 # Two sweeps run 30 minutes apart; a leg still missing on the third has
 # outlasted a routing blip.
@@ -70,12 +71,7 @@ def _key(leg: HeldLeg) -> str:
     return f"{leg.kind}|{leg.identity}"
 
 
-class _NewerStore(Exception):
-    """The notice file carries a schema_version this reader does not know yet."""
-
-
 def _load() -> dict[str, dict]:
-    """The recorded entries; raises `_NewerStore` for a newer-version file."""
     path = _path()
     if not path.exists():
         return {}
@@ -88,8 +84,6 @@ def _load() -> dict[str, dict]:
         )
         return {}
     version = payload.get("schema_version") if isinstance(payload, dict) else None
-    if type(version) is int and version > NOTICES_SCHEMA_VERSION:
-        raise _NewerStore(f"{path} is schema_version {version}")
     if type(version) is not int or version != NOTICES_SCHEMA_VERSION:
         print(
             f"[drive-engine] unplanned-notices {path} is not schema_version "
@@ -144,17 +138,7 @@ def due_notices(missing: list[HeldLeg], *, now: datetime) -> list[HeldLeg]:
     """
     if now.tzinfo is None:
         raise ValueError("due_notices: `now` must be timezone-aware")
-    writable = True
-    try:
-        entries = _load()
-    except _NewerStore as exc:
-        print(
-            f"[drive-engine] unplanned-notices {exc}, newer than this engine's "
-            f"{NOTICES_SCHEMA_VERSION}; reading it as nothing noticed yet and leaving it "
-            "untouched — deploy the current nanoclaw-travel plugin",
-            file=sys.stderr,
-        )
-        entries, writable = {}, False
+    entries = _load()
     current: dict[str, HeldLeg] = {}
     for leg in missing:
         if leg.when is None or not (now <= leg.when <= now + NOTICE_HORIZON):
@@ -173,6 +157,6 @@ def due_notices(missing: list[HeldLeg], *, now: datetime) -> list[HeldLeg]:
             due.append(leg)
         updated[key] = entry
 
-    if writable and updated != entries:
+    if updated != entries:
         _store(updated)
     return sorted(due, key=lambda leg: (leg.when or now, leg.identity))

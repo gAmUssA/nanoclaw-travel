@@ -46,6 +46,7 @@ _BUNDLE_DIR = Path(__file__).resolve().parent
 if str(_BUNDLE_DIR) not in sys.path:
     sys.path.insert(0, str(_BUNDLE_DIR))
 
+# E402: these bundle-local imports resolve only after the sys.path insert above.
 from airport_facts_cache import StaticAirport, load_static_facts, store_static_facts  # noqa: E402
 from block_codec import ParsedBlock, parse_block  # noqa: E402
 from calendar_apply import apply_plan  # noqa: E402

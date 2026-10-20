@@ -8,7 +8,7 @@ Each on-disk file has one owner module that owns its schema (only it migrates `s
 
 - `skip-state.json` — owned by `skip_state.py`. Writer and reader are co-bundled and go through the owner API: the skip action (`skip_drive.py`) writes via `add_skip`, the sweep (`reconcile_sweep.py`) reads via `load_active_skips`. No skill rewrites the file directly.
 - `airport-facts.json` — owned by `airport_facts_cache.py`. The sweep (`reconcile_sweep.py`) both reads (`load_static_facts`) and writes (`store_static_facts`) through the owner API (#211).
-- `unplanned-notices.json` — owned by `unplanned_notices.py`. The sweep (`reconcile_sweep.py`) reads and writes it through `due_notices` (#334).
+- `unplanned-notices.v1.json` — owned by `unplanned_notices.py`. The sweep (`reconcile_sweep.py`) reads and writes it through `due_notices` (#334).
 - `drive-decisions.json` — owned by `drive_decision.py`. The sweep writes the drive-time-derived verdict (`record_drive_time`, `mark_asked`) and the answer action (`answer_drive_or_fly.py`) writes the operator's (`record_operator_answer`). `check-travel-bookings` is a read-only, non-migrating consumer in another skill (#231).
 
 `skip_state.py` came from the retired `drive-planner` (#156), whose bundle was folded into drive-engine once drive-engine was its only importer (#181).
@@ -89,7 +89,7 @@ Tolerance — **hint, not authority** (the deliberate opposite of `skip-state.js
 
 Migration: version `2` added `lat` / `lon` (#334). The owner reads a version-`1` file as version 2 with no coordinates and rewrites it as version 2 on that read (a failed rewrite is a stderr diagnostic, retried next read); the sweep then refetches each airport without coordinates once (`reconcile_sweep._resolve_one_airport`). Because a future version reads as no-usable-prior-state (refetch, non-disruptive), a newer writer's file survives untouched until this reader is upgraded — no fail-closed refusal is needed (`coding-policy: stateful-artifacts`, Cross-Pipeline Schema Bumps). The refetch is non-disruptive even when byAir is also down: a cache-miss airport that byAir can't resolve makes `reconcile_sweep._resolve_one_airport` raise `AirportUnresolved`, failing the whole sweep closed rather than building a partial plan that would orphan-delete live blocks (#211). So the empty-map fallback never escalates work — it costs at most one slow (or skipped) sweep, never a wrong or deleted block.
 
-### `unplanned-notices.json`
+### `unplanned-notices.v1.json`
 
 Which drives the engine has told the operator it cannot plan, so each is mentioned once. Owned by `unplanned_notices.py` (#334). A held leg with no block on the calendar is a missing drive; the sweep mentions it once it has been missing for `PERSIST_BEFORE_NOTICE` and only while it falls within `NOTICE_HORIZON` (both constants at the top of the module).
 
@@ -116,7 +116,9 @@ Writer / reader contract:
 - **Writer / Reader** — the sweep calls `due_notices(missing, now=...)` once per sweep. An entry absent from this sweep's missing legs is dropped (the drive planned again, so a later failure is news again); an expired entry restarts its spell.
 - A write failure raises `OSError`; the sweep reports it on stderr and sends no unplanned-drive notice that sweep. The plan is unaffected.
 
-Tolerance — hint, not authority: a missing, unreadable, non-object or older-version file reads as "nothing noticed yet", with a stderr diagnostic for anything but a plain missing file. The cost is one repeated notice, never a missed drive. Malformed entries are dropped. A file of a newer `schema_version` is no usable prior state as well, with a stderr diagnostic naming the upgrade, but it belongs to a newer engine and is never written: `due_notices` reads it as nothing noticed yet on every sweep and leaves it byte-for-byte untouched. With no first-seen time kept, no leg outlasts `PERSIST_BEFORE_NOTICE`, so no notice goes out (never one per sweep) until this reader is updated.
+Versioned file name: each `schema_version` keeps its own file, `unplanned-notices.v<N>.json`, so engines of different versions never read or write each other's record. A shape change bumps the version and with it the file name; the new owner may read the previous version's file to migrate it. After an upgrade or a rollback the running engine starts or resumes its own file, at the cost of at most one repeated notice, and never touches another version's.
+
+Tolerance — hint, not authority: a missing, unreadable, non-object or malformed file reads as "nothing noticed yet", with a stderr diagnostic for anything but a plain missing file. The cost is one repeated notice, never a missed drive. Malformed entries are dropped.
 
 Migration: `schema_version` `1` is the initial version.
 

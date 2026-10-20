@@ -29,6 +29,7 @@ sys.path.insert(0, str(REPO_ROOT / "skills" / "travel-core"))
 sys.path.insert(0, str(REPO_ROOT / "skills" / "drive-engine"))
 sys.path.insert(0, str(REPO_ROOT / "skills" / "flight-assist"))
 
+# E402: the skill modules resolve only after the sys.path inserts above.
 import reconcile_sweep  # noqa: E402
 import unplanned_notices  # noqa: E402
 from airport_drive_inputs import airport_context  # noqa: E402
@@ -328,10 +329,10 @@ def test_a_drive_beyond_the_horizon_or_past_is_not_announced(state_dir):
 
 
 def test_an_unreadable_notice_file_starts_fresh_and_says_so(state_dir, capsys):
-    (state_dir / "unplanned-notices.json").write_text("{nope", encoding="utf-8")
+    (state_dir / "unplanned-notices.v1.json").write_text("{nope", encoding="utf-8")
     assert unplanned_notices.due_notices([_held()], now=NOW) == []
     assert "unreadable" in capsys.readouterr().err
-    stored = json.loads((state_dir / "unplanned-notices.json").read_text(encoding="utf-8"))
+    stored = json.loads((state_dir / "unplanned-notices.v1.json").read_text(encoding="utf-8"))
     assert stored["schema_version"] == 1 and len(stored["legs"]) == 1
 
 
@@ -442,7 +443,7 @@ def test_a_shadow_sweep_records_no_notice(state_dir, monkeypatch):
             now=NOW + timedelta(minutes=minutes),
         )
         assert payload["data"]["shadow"] is True
-    assert not (state_dir / "unplanned-notices.json").exists()
+    assert not (state_dir / "unplanned-notices.v1.json").exists()
 
 
 def test_a_live_sweep_announces_a_drive_missing_for_an_hour(state_dir, monkeypatch):
@@ -579,13 +580,36 @@ def test_an_unreadable_record_of_another_flight_leaves_the_orphan_to_go():
     assert [d.event_id for d in result.plan.deletes] == ["evt-1"]
 
 
-def test_a_newer_notice_file_is_left_untouched(state_dir, capsys):
+def test_another_versions_notice_file_is_neither_read_nor_written(state_dir):
+    """A newer engine's record lives in its own file: this engine still
+    announces a missing drive, once, and leaves that file byte-for-byte."""
     newer = '{"schema_version": 2, "legs": {"kept": "as is"}}'
-    (state_dir / "unplanned-notices.json").write_text(newer, encoding="utf-8")
-    for hour in (0, 1, 2):
-        assert unplanned_notices.due_notices([_held()], now=NOW + timedelta(hours=hour)) == []
-    assert (state_dir / "unplanned-notices.json").read_text(encoding="utf-8") == newer
-    assert "newer than this engine" in capsys.readouterr().err
+    (state_dir / "unplanned-notices.v2.json").write_text(newer, encoding="utf-8")
+    leg = _held()
+    seen = [unplanned_notices.due_notices([leg], now=NOW + timedelta(hours=h)) for h in (0, 1, 2)]
+    assert seen == [[], [leg], []]
+    assert (state_dir / "unplanned-notices.v2.json").read_text(encoding="utf-8") == newer
+
+
+def test_a_transfer_still_ahead_in_its_window_is_not_history():
+    """The connection was dropped mid-layover: its transfer drive, anchored at
+    the landing that opened the window, is still ahead and goes."""
+    transfer = ParsedBlock(
+        **{
+            **_block("A|B", "airport_transfer", "transfer-evt").__dict__,
+            "anchor": NOW - timedelta(hours=1),
+            "window_end": NOW + timedelta(hours=3),
+        }
+    )
+    done = ParsedBlock(
+        **{
+            **_block("C|D", "airport_transfer", "done-evt").__dict__,
+            "anchor": NOW - timedelta(hours=5),
+            "window_end": NOW - timedelta(hours=1),
+        }
+    )
+    plan = plan_reconcile([], [transfer, done], now=NOW)
+    assert [d.event_id for d in plan.deletes] == ["transfer-evt"]
 
 
 def test_a_local_drive_covered_by_its_outer_block_is_not_missing():

@@ -276,6 +276,15 @@ def _needs_update(current: ParsedBlock, desired: DesiredBlock) -> bool:
     return drift >= _BASELINE_SHIFT_TOLERANCE_SECONDS
 
 
+def _done_by(block: ParsedBlock) -> datetime | None:
+    """When a block's drive is behind the operator: a transfer's at the end of
+    its window (its anchor is the landing that opens it), any other's at its
+    anchor."""
+    if block.kind == "airport_transfer" and block.window_end is not None:
+        return block.window_end
+    return block.anchor
+
+
 def plan_reconcile(
     desired: list[DesiredBlock],
     current: list[ParsedBlock],
@@ -291,8 +300,8 @@ def plan_reconcile(
     entirely untouched — never orphaned. `held` are the `(identity, kind)` keys
     of legs that exist but could not be computed this sweep (`HeldLeg`): their
     current unified blocks are neither updated nor deleted. With `now`, a
-    unified block whose anchor has already passed is history and is never
-    orphan-deleted: a meeting that ended drops out of the calendar fetch, and
+    unified block whose drive is behind the operator (`_done_by`) is history
+    and is never orphan-deleted: a meeting that ended drops out of the calendar fetch, and
     its drive stays where it happened. Pure and deterministic: output action
     lists are ordered by the desired-leg order then the current-block order, and
     the only clock is the `now` passed in.
@@ -346,7 +355,8 @@ def plan_reconcile(
     for (identity, kind), blocks in unified_by_key.items():
         if (identity, kind) not in desired_keys and (identity, kind) not in held:
             for block in blocks:
-                if now is not None and block.anchor is not None and block.anchor < now:
+                done_by = _done_by(block)
+                if now is not None and done_by is not None and done_by < now:
                     continue  # history, not an orphan
                 deletes.append(Delete(block.event_id, "orphan: no desired leg"))
 
