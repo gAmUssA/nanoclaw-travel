@@ -228,6 +228,7 @@ def meeting_desired_blocks(
                             else meeting.end or meeting.start
                         ),
                         reason=f"meeting {meeting.meeting_id}: {meeting.reason}",
+                        announce=False,
                     )
                 )
             continue

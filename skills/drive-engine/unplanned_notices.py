@@ -93,6 +93,11 @@ def _load() -> dict[str, dict]:
         return {}
     legs = payload.get("legs")
     if not isinstance(legs, dict):
+        print(
+            f"[drive-engine] unplanned-notices {path} has no `legs` object; starting fresh "
+            "(a missing drive may be announced once more)",
+            file=sys.stderr,
+        )
         return {}
     kept: dict[str, dict] = {}
     for key, entry in legs.items():

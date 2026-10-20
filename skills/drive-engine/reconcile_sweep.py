@@ -233,7 +233,7 @@ def build_plan(
     could not compute: their blocks are kept (#334). `boarding_present` gates
     trivial-leg suppression (V3).
     """
-    flights = list(tripit_flights or [])
+    flights: list = []
     airport_info: dict[str, AirportInfo] = {}
     skipped: list[str] = []
     unreadable: list[tuple[str, datetime | None]] = []
@@ -269,6 +269,8 @@ def build_plan(
             lon=arr.lon,
         )
 
+    retained = _unreadable_flight_holds(unreadable, current_blocks)
+    flights = [f for f in tripit_flights or [] if not _retained_flight(f, retained)] + flights
     result = build_reconcile_plan(
         flights=flights,
         airport_info=airport_info,
@@ -281,7 +283,7 @@ def build_plan(
         live_origin=live_origin,
         boarding_present=boarding_present,
         extra_desired=meeting_blocks + list(lodging_blocks or []),
-        extra_held=list(held or []) + _unreadable_flight_holds(unreadable, current_blocks),
+        extra_held=list(held or []) + retained,
         managed_legacy=_MANAGED_LEGACY,
     )
     return PlanResult(plan=result.plan, skipped=tuple(skipped) + result.skipped, held=result.held)
@@ -354,9 +356,25 @@ def _unreadable_flight_holds(
                 summary=f"Drive: {block.origin or '?'} → {block.destination or '?'}",
                 when=block.anchor,
                 reason=f"byAir {reason}",
+                announce=False,
             )
         )
     return held
+
+
+def _retained_flight(flight, held: list[HeldLeg]) -> bool:
+    """Whether a held airport block stands for this flight: same route,
+    departing within the merge tolerance. Its TripIt copy then plans nothing
+    beside the block, whose identity carries byAir's departure."""
+    for leg in held:
+        for part in leg.identity.split("|"):
+            route = part.rpartition("-")[0]
+            departures = _flight_departures(part)
+            if not departures or route != f"{flight.dep_airport}-{flight.arr_airport}":
+                continue
+            if abs(departures[0] - flight.scheduled_dep) <= DEFAULT_IDENTITY_TOLERANCE:
+                return True
+    return False
 
 
 # --- real-client wiring (I/O) -----------------------------------------------
@@ -1298,14 +1316,10 @@ def _run_sweep() -> dict:
 def _missing(
     held: tuple[HeldLeg, ...] | list[HeldLeg], current: list[ParsedBlock]
 ) -> list[HeldLeg]:
-    """The held legs with no block on the calendar, of their own or of an outer
-    leg covering them — drives that are simply absent, not kept."""
+    """The announced held legs with no block on the calendar — drives the
+    engine failed to plan, simply absent rather than kept."""
     present = {(block.identity, block.kind) for block in current if block.identity is not None}
-    return [
-        leg
-        for leg in held
-        if leg.key not in present and not any(key in present for key in leg.covered_by)
-    ]
+    return [leg for leg in held if leg.announce and leg.key not in present]
 
 
 def _unplanned_notices(

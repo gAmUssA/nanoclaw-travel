@@ -35,7 +35,7 @@ import unplanned_notices  # noqa: E402
 from airport_drive_inputs import airport_context  # noqa: E402
 from block_codec import GEN_UNIFIED, ParsedBlock  # noqa: E402
 from engine import AirportInfo, build_reconcile_plan  # noqa: E402
-from flight_identity import BYAIR, Flight  # noqa: E402
+from flight_identity import BYAIR, TRIPIT, Flight  # noqa: E402
 from lodging_source import KIND_OUTBOUND, KIND_RETURN, DriveTrip, lodging_desired_blocks  # noqa: E402
 from maps_client import TomTomClient, TravelTime  # noqa: E402
 from meeting_source import meeting_desired_blocks  # noqa: E402
@@ -612,14 +612,88 @@ def test_a_transfer_still_ahead_in_its_window_is_not_history():
     assert [d.event_id for d in plan.deletes] == ["transfer-evt"]
 
 
-def test_a_local_drive_covered_by_its_outer_block_is_not_missing():
-    local = HeldLeg(
+def test_a_hold_that_only_keeps_blocks_is_never_missing():
+    keeping = HeldLeg(
         identity="mtg-back",
         kind="meeting_return",
         summary="Drive: Game",
         when=NOW + timedelta(days=1),
         reason="lodging trip-1: lodging→home route failed",
-        covered_by=(("trip-1", KIND_RETURN),),
+        announce=False,
     )
-    assert reconcile_sweep._missing([local], [_block("trip-1", KIND_RETURN)]) == []
-    assert reconcile_sweep._missing([local], []) == [local]
+    assert reconcile_sweep._missing([keeping], []) == []
+
+
+@pytest.mark.parametrize("reason", ["meeting skipped by the operator", "meeting already started"])
+def test_a_meeting_under_way_is_never_announced_missing(reason):
+    """#336 review: a skipped meeting, or one whose return the scan left out
+    across a tight gap, turns `past` once it starts; its holds only keep blocks."""
+    start = NOW - timedelta(minutes=30)
+    under_way = MeetingClass(
+        meeting_id="m4",
+        summary="Workshop",
+        bucket="past",
+        reason=reason,
+        location="1 Main St",
+        start=start,
+        end=start + timedelta(hours=4),
+        legs=(),
+    )
+    _blocks, _skipped, held = meeting_desired_blocks([under_way], route=lambda o, d: None)
+    assert held and reconcile_sweep._missing(held, []) == []
+
+
+def test_a_notice_file_without_legs_starts_fresh_and_says_so(state_dir, capsys):
+    path = state_dir / "unplanned-notices.v1.json"
+    path.write_text('{"schema_version": 1}', encoding="utf-8")
+    assert unplanned_notices.due_notices([_held()], now=NOW) == []
+    assert f"{path} has no `legs` object" in capsys.readouterr().err
+
+
+def test_tripits_copy_of_a_held_byair_flight_plans_nothing_beside_it():
+    """#336 review: byAir's block says 15:00, TripIt's copy 14:55. With the byAir
+    record unreadable, the held block stands for the journey, and TripIt's
+    copy must not create a second drive under its own identity."""
+    identity = _identity_of("airport_departure")
+    current = [_block(identity, "airport_departure")]
+    tripit = Flight(
+        dep_airport="BNA",
+        arr_airport="SFO",
+        scheduled_dep=datetime(2025, 10, 22, 14, 55, tzinfo=UTC),
+        scheduled_arr=datetime(2025, 10, 22, 18, 55, tzinfo=UTC),
+        source=TRIPIT,
+        tripit_segment_id="seg-1",
+    )
+    result = reconcile_sweep.build_plan(
+        flight_records=[_byair_record("2025-10-22T15:00:00Z")],
+        resolve_airport=lambda _id: None,
+        meeting_blocks=[],
+        current_blocks=current,
+        route=lambda o, d: timedelta(minutes=40),
+        now=NOW,
+        home_address=HOME,
+        tripit_flights=[tripit],
+    )
+    assert result.plan.creates == () and result.plan.deletes == ()
+
+
+def test_tripits_copy_plans_when_no_block_is_held_for_it():
+    tripit = Flight(
+        dep_airport="BNA",
+        arr_airport="SFO",
+        scheduled_dep=datetime(2025, 10, 22, 14, 55, tzinfo=UTC),
+        scheduled_arr=datetime(2025, 10, 22, 18, 55, tzinfo=UTC),
+        source=TRIPIT,
+        tripit_segment_id="seg-1",
+    )
+    result = reconcile_sweep.build_plan(
+        flight_records=[_byair_record("2025-10-22T15:00:00Z")],
+        resolve_airport=lambda _id: None,
+        meeting_blocks=[],
+        current_blocks=[],
+        route=lambda o, d: timedelta(minutes=40),
+        now=NOW,
+        home_address=HOME,
+        tripit_flights=[tripit],
+    )
+    assert result.plan.creates != ()

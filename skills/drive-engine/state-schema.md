@@ -8,7 +8,7 @@ Each on-disk file has one owner module that owns its schema (only it migrates `s
 
 - `skip-state.json` — owned by `skip_state.py`. Writer and reader are co-bundled and go through the owner API: the skip action (`skip_drive.py`) writes via `add_skip`, the sweep (`reconcile_sweep.py`) reads via `load_active_skips`. No skill rewrites the file directly.
 - `airport-facts.json` — owned by `airport_facts_cache.py`. The sweep (`reconcile_sweep.py`) both reads (`load_static_facts`) and writes (`store_static_facts`) through the owner API (#211).
-- `unplanned-notices.v1.json` — owned by `unplanned_notices.py`. The sweep (`reconcile_sweep.py`) reads and writes it through `due_notices` (#334).
+- `unplanned-notices.v1.json` — owned by `skills/drive-engine/unplanned_notices.py`. The sweep (`skills/drive-engine/reconcile_sweep.py`) reads and writes it through `due_notices` (#334).
 - `drive-decisions.json` — owned by `drive_decision.py`. The sweep writes the drive-time-derived verdict (`record_drive_time`, `mark_asked`) and the answer action (`answer_drive_or_fly.py`) writes the operator's (`record_operator_answer`). `check-travel-bookings` is a read-only, non-migrating consumer in another skill (#231).
 
 `skip_state.py` came from the retired `drive-planner` (#156), whose bundle was folded into drive-engine once drive-engine was its only importer (#181).
@@ -91,7 +91,7 @@ Migration: version `2` added `lat` / `lon` (#334). The owner reads a version-`1`
 
 ### `unplanned-notices.v1.json`
 
-Which drives the engine has told the operator it cannot plan, so each is mentioned once. Owned by `unplanned_notices.py` (#334). A held leg with no block on the calendar is a missing drive; the sweep mentions it once it has been missing for `PERSIST_BEFORE_NOTICE` and only while it falls within `NOTICE_HORIZON` (both constants at the top of the module).
+Which drives the engine has told the operator it cannot plan, so each is mentioned once. Owned by `skills/drive-engine/unplanned_notices.py` (#334). An announced held leg (`HeldLeg.announce`) with no block on the calendar is a missing drive; the sweep mentions it once it has been missing for `PERSIST_BEFORE_NOTICE` and only while it falls within `NOTICE_HORIZON` (constants at the top of `skills/drive-engine/unplanned_notices.py`). A hold that only keeps blocks in place is never announced.
 
 ```json
 {
@@ -109,7 +109,7 @@ Which drives the engine has told the operator it cannot plan, so each is mention
 Fields:
 
 - `schema_version` (int, required) — currently `1`
-- `legs` (object, required) — map of `<kind>|<identity>` (the leg's reconcile key) → `{first_seen, expires, notified}`. `first_seen` is when the sweep first found the leg missing in this spell, `expires` its leg time plus a day, both UTC `YYYY-MM-DDTHH:MM:SSZ`; `notified` is whether the operator was told.
+- `legs` (object, required) — map of `<kind>|<identity>` (the leg's reconcile key) → `{first_seen, expires, notified}`. `first_seen` is when the sweep first found the leg missing in this spell, `expires` when the entry lapses (set by `skills/drive-engine/unplanned_notices.py` from the leg's time), both UTC `YYYY-MM-DDTHH:MM:SSZ`; `notified` is whether the operator was told.
 
 Writer / reader contract:
 
@@ -118,7 +118,7 @@ Writer / reader contract:
 
 Versioned file name: each `schema_version` keeps its own file, `unplanned-notices.v<N>.json`, so engines of different versions never read or write each other's record. A shape change bumps the version and with it the file name; the new owner may read the previous version's file to migrate it. After an upgrade or a rollback the running engine starts or resumes its own file, at the cost of at most one repeated notice, and never touches another version's.
 
-Tolerance — hint, not authority: a missing, unreadable, non-object or malformed file reads as "nothing noticed yet", with a stderr diagnostic for anything but a plain missing file. The cost is one repeated notice, never a missed drive. Malformed entries are dropped.
+Tolerance — hint, not authority: a missing, unreadable, non-object or malformed file (another `schema_version`, no `legs` object) reads as "nothing noticed yet", with a stderr diagnostic for anything but a plain missing file. The cost is one repeated notice, never a missed drive. Malformed entries are dropped.
 
 Migration: `schema_version` `1` is the initial version.
 
