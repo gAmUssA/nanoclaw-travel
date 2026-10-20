@@ -329,17 +329,21 @@ class _FakeCtx:
     """Stand-in for `airport_context`'s AirportContext (the `_AirportCtx`
     Protocol shape)."""
 
-    def __init__(self, code, flag=None, delay_index=None, timezone=None):
+    def __init__(self, code, flag=None, delay_index=None, timezone=None, lat=None, lon=None):
         self.code = code
         self.flag = flag
         self.delay_index = delay_index
         self.timezone = timezone
+        self.lat = lat
+        self.lon = lon
 
 
 def test_resolve_warm_static_hit_no_delay_never_fetches():
     """A cached airport with no near-term departure resolves with ZERO byAir
     calls — the warm-sweep saving that unfroze the calendar (#211)."""
-    static = StaticAirport(iata="JFK", flag="🇺🇸", timezone="America/New_York")
+    static = StaticAirport(
+        iata="JFK", flag="🇺🇸", timezone="America/New_York", lat=40.64, lon=-73.78
+    )
     calls = []
 
     def fetch():
@@ -348,8 +352,27 @@ def test_resolve_warm_static_hit_no_delay_never_fetches():
 
     resolved, new_static = _resolve_one_airport(static=static, want_delay=False, fetch=fetch)
     assert calls == []  # never fetched
-    assert resolved == ResolvedAirport(iata="JFK", flag="🇺🇸", timezone="America/New_York")
+    assert resolved == ResolvedAirport(
+        iata="JFK", flag="🇺🇸", timezone="America/New_York", lat=40.64, lon=-73.78
+    )
     assert new_static is None  # nothing new to persist
+
+
+def test_resolve_a_cached_airport_without_coordinates_refetches_them():
+    """A version-1 cache entry has no coordinates; one fetch fills them (#334)."""
+    static = StaticAirport(iata="JFK", flag="🇺🇸", timezone="America/New_York")
+    fetched = _FakeCtx("JFK", flag="🇺🇸", timezone="America/New_York", lat=40.64, lon=-73.78)
+    resolved, new_static = _resolve_one_airport(
+        static=static, want_delay=False, fetch=lambda: fetched
+    )
+    assert (resolved.lat, resolved.lon) == (40.64, -73.78)
+    assert new_static is not None and new_static.has_coordinates
+
+
+def test_resolve_a_coordinate_refetch_that_fails_keeps_the_cached_facts():
+    static = StaticAirport(iata="JFK", flag="🇺🇸", timezone="America/New_York")
+    resolved, new_static = _resolve_one_airport(static=static, want_delay=False, fetch=lambda: None)
+    assert (resolved.iata, resolved.lat, new_static) == ("JFK", None, None)
 
 
 def test_resolve_miss_fetches_and_returns_static_to_persist():
@@ -459,11 +482,17 @@ def test_resolver_warm_hit_makes_no_fetch_and_stays_clean():
     fetches and leaves the dirty flag unset (nothing new to persist)."""
     fetch, calls = _counting_fetch({})
     resolve, dirty = _make_airport_resolver(
-        static_facts={7: StaticAirport(iata="BNA", flag="🇺🇸", timezone="America/Chicago")},
+        static_facts={
+            7: StaticAirport(
+                iata="BNA", flag="🇺🇸", timezone="America/Chicago", lat=36.12, lon=-86.68
+            )
+        },
         near_term_dep_ids=set(),
         fetch_ctx=fetch,
     )
-    assert resolve(7) == ResolvedAirport(iata="BNA", flag="🇺🇸", timezone="America/Chicago")
+    assert resolve(7) == ResolvedAirport(
+        iata="BNA", flag="🇺🇸", timezone="America/Chicago", lat=36.12, lon=-86.68
+    )
     assert calls == []
     assert dirty() is False
 
@@ -803,7 +832,7 @@ def test_plan_lodging_legs_drops_the_local_drive_the_outbound_absorbed(tmp_path,
     def route(origin, destination):
         return timedelta(hours=2)
 
-    blocks, skipped, questions, kept = reconcile_sweep._plan_lodging_legs(
+    blocks, skipped, questions, kept, _held = reconcile_sweep._plan_lodging_legs(
         schedule=_drive_trip_schedule(),
         home=home,
         route=route,
@@ -830,7 +859,7 @@ def test_plan_lodging_legs_keeps_every_meeting_block_when_no_trip_matches(tmp_pa
         baseline_seconds=1800,
         anchor=datetime(2020, 8, 3, 14, 30, tzinfo=UTC),
     )
-    blocks, skipped, questions, kept = reconcile_sweep._plan_lodging_legs(
+    blocks, skipped, questions, kept, _held = reconcile_sweep._plan_lodging_legs(
         schedule=[],
         home="home",
         route=lambda origin, destination: timedelta(hours=1),

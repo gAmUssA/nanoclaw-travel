@@ -1,0 +1,390 @@
+"""Held legs (#334): a leg the engine could not compute keeps its block.
+
+On 2026-10-19 Google Distance Matrix failed for a few minutes, the router fell
+back to TomTom, and TomTom geocoded "SFO airport" as the town of Airport, MO.
+The implausible legs were skipped, a skipped leg left the desired set, and the
+reconcile orphan-deleted thirteen correct blocks. These tests pin the fix:
+
+  - a leg that cannot be computed (route failed, implausible, unresolved
+    position, past) is held, and its current block is neither deleted nor
+    updated; a deliberately suppressed leg (a trivial drive) still deletes
+  - meeting and lodging legs hold the same way
+  - airports route by their byAir coordinates; a backup-provider answer for a
+    text airport is refused, so the leg holds
+  - a held leg with no block is announced once it has been missing an hour
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+import types
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO_ROOT / "skills" / "travel-core"))
+sys.path.insert(0, str(REPO_ROOT / "skills" / "drive-engine"))
+sys.path.insert(0, str(REPO_ROOT / "skills" / "flight-assist"))
+
+import reconcile_sweep  # noqa: E402
+import unplanned_notices  # noqa: E402
+from airport_drive_inputs import airport_context  # noqa: E402
+from block_codec import GEN_UNIFIED, ParsedBlock  # noqa: E402
+from engine import AirportInfo, build_reconcile_plan  # noqa: E402
+from flight_identity import BYAIR, Flight  # noqa: E402
+from lodging_source import KIND_OUTBOUND, KIND_RETURN, DriveTrip, lodging_desired_blocks  # noqa: E402
+from maps_client import TomTomClient, TravelTime  # noqa: E402
+from meeting_source import meeting_desired_blocks  # noqa: E402
+from reconcile import DesiredBlock, HeldLeg, plan_reconcile  # noqa: E402
+from scan import MeetingClass, TransitLeg  # noqa: E402
+
+HOME = "12 Example St, TN"
+NOW = datetime(2026, 10, 19, 20, 30, tzinfo=UTC)
+US = "🇺🇸"
+
+
+def _flight(dep="BNA", arr="SFO", *, fid=1, day=22):
+    return Flight(
+        dep_airport=dep,
+        arr_airport=arr,
+        scheduled_dep=datetime(2026, 10, day, 15, 0, tzinfo=UTC),
+        scheduled_arr=datetime(2026, 10, day, 19, 0, tzinfo=UTC),
+        source=BYAIR,
+        byair_flight_id=fid,
+    )
+
+
+def _info(**coords):
+    return {
+        code: AirportInfo(flag=US, timezone="America/Chicago", lat=lat, lon=lon)
+        for code, (lat, lon) in coords.items()
+    }
+
+
+def _block(identity, kind, event_id="evt-1"):
+    return ParsedBlock(
+        generation=GEN_UNIFIED,
+        event_id=event_id,
+        identity=identity,
+        kind=kind,
+        anchor=NOW + timedelta(days=1),
+        origin=HOME,
+        destination="BNA airport",
+        baseline_seconds=2400,
+    )
+
+
+def _plan(route, *, current, now=NOW, info=None, flights=None):
+    return build_reconcile_plan(
+        flights=flights or [_flight()],
+        airport_info=info or _info(BNA=(36.12, -86.68), SFO=(37.62, -122.38)),
+        current_blocks=current,
+        route=route,
+        home_address=HOME,
+        now=now,
+    )
+
+
+def _identity_of(kind, route=lambda o, d: timedelta(minutes=40)):
+    """The engine's identity for this flight's leg of `kind`."""
+    result = _plan(route, current=[])
+    return next(c.desired.identity for c in result.plan.creates if c.desired.kind == kind)
+
+
+# --- the reconcile diff -------------------------------------------------------
+
+
+def test_a_held_key_keeps_its_block_and_an_unheld_orphan_goes():
+    current = [_block("a", "airport_departure", "keep"), _block("b", "airport_departure", "go")]
+    plan = plan_reconcile([], current, held=frozenset({("a", "airport_departure")}))
+    assert [d.event_id for d in plan.deletes] == ["go"]
+    assert plan.updates == ()
+
+
+# --- airport legs -------------------------------------------------------------
+
+
+def test_a_failed_route_keeps_the_existing_airport_blocks():
+    dep = _identity_of("airport_departure")
+    arr = _identity_of("airport_arrival")
+    current = [_block(dep, "airport_departure", "d"), _block(arr, "airport_arrival", "a")]
+    result = _plan(lambda o, d: None, current=current)
+    assert result.plan.deletes == () and result.plan.updates == ()
+    assert {leg.kind for leg in result.held} == {"airport_departure", "airport_arrival"}
+
+
+def test_an_implausible_drive_keeps_the_existing_block():
+    """The Airport, MO answer: a 28.8 h "drive" is held, not a reason to delete."""
+    dep = _identity_of("airport_departure")
+    result = _plan(lambda o, d: timedelta(hours=28.8), current=[_block(dep, "airport_departure")])
+    assert result.plan.deletes == ()
+    assert any("implausible" in leg.reason for leg in result.held)
+
+
+def test_a_past_leg_keeps_its_block():
+    dep = _identity_of("airport_departure")
+    after = datetime(2026, 10, 23, tzinfo=UTC)
+    result = _plan(
+        lambda o, d: timedelta(minutes=40), current=[_block(dep, "airport_departure")], now=after
+    )
+    assert result.plan.deletes == ()
+
+
+def test_a_trivial_leg_still_deletes_its_block():
+    """A deliberate suppression is not a hold."""
+    dep = _identity_of("airport_departure")
+    result = _plan(lambda o, d: timedelta(seconds=30), current=[_block(dep, "airport_departure")])
+    assert [d.event_id for d in result.plan.deletes] == ["evt-1"]
+
+
+def test_airports_route_by_their_coordinates():
+    seen: list = []
+
+    def route(origin, destination):
+        seen.append((origin, destination))
+        return timedelta(minutes=40)
+
+    result = _plan(route, current=[])
+    assert (HOME, "36.12,-86.68") in seen
+    assert any(o == "37.62,-122.38" for o, _ in seen)
+    dep = next(c.desired for c in result.plan.creates if c.desired.kind == "airport_departure")
+    assert dep.destination == "BNA airport"
+
+
+def test_an_airport_without_coordinates_routes_by_name():
+    seen: list = []
+
+    def route(origin, destination):
+        seen.append(destination)
+        return timedelta(minutes=40)
+
+    _plan(route, current=[], info={"BNA": AirportInfo(flag=US), "SFO": AirportInfo(flag=US)})
+    assert "BNA airport" in seen
+
+
+# --- the router ---------------------------------------------------------------
+
+
+def _tt(source, minutes=40, origin_resolved="Airport, MO"):
+    return TravelTime(
+        duration_seconds=minutes * 60,
+        in_traffic_seconds=None,
+        traffic_factor=1.0,
+        distance_meters=1000,
+        origin_resolved=origin_resolved,
+        destination_resolved="250 Beach St",
+        source=source,
+    )
+
+
+class _Maps:
+    def __init__(self, answer):
+        self.answer = answer
+
+    def travel_time(self, origin, destination):
+        return self.answer
+
+
+def test_a_backup_answer_for_a_text_airport_is_refused(capsys):
+    route = reconcile_sweep.make_route(_Maps(_tt("tomtom", 298)))
+    assert route("SFO airport", "250 Beach St, San Francisco") is None
+    assert "refused" in capsys.readouterr().err
+
+
+def test_a_backup_answer_for_coordinates_or_addresses_stands():
+    route = reconcile_sweep.make_route(_Maps(_tt("tomtom")))
+    assert route("37.62,-122.38", "250 Beach St") == timedelta(minutes=40)
+    assert route(HOME, "250 Beach St") == timedelta(minutes=40)
+
+
+def test_the_primary_answer_for_a_text_airport_stands():
+    route = reconcile_sweep.make_route(_Maps(_tt("google")))
+    assert route("SFO airport", HOME) == timedelta(minutes=40)
+
+
+def test_tomtom_takes_coordinates_without_geocoding(monkeypatch):
+    client = TomTomClient("key")
+    monkeypatch.setattr(client, "_geocode", lambda query: pytest.fail(f"geocoded {query}"))
+    assert client._locate("36.12,-86.68") == (36.12, -86.68, "36.12,-86.68")
+    assert client._locate(" 36.12, -86.68 ") == (36.12, -86.68, "36.12, -86.68")
+
+
+def test_tomtom_geocodes_a_name_or_an_out_of_range_pair(monkeypatch):
+    client = TomTomClient("key")
+    monkeypatch.setattr(client, "_geocode", lambda query: (1.0, 2.0, query))
+    assert client._locate("SFO airport") == (1.0, 2.0, "SFO airport")
+    assert client._locate("95,10") == (1.0, 2.0, "95,10")
+
+
+def test_byair_coordinates_reach_the_airport_context():
+    ctx = airport_context({"code": "BNA", "lat": 36.125247, "lon": -86.677102})
+    assert (ctx.lat, ctx.lon) == (36.125247, -86.677102)
+    bad = airport_context({"code": "BNA", "lat": "36.1", "lon": 400})
+    assert (bad.lat, bad.lon) == (None, None)
+
+
+# --- meeting and lodging legs --------------------------------------------------
+
+
+def _meeting(origin=HOME):
+    start = NOW + timedelta(days=1)
+    return MeetingClass(
+        meeting_id="m1",
+        summary="Dentist",
+        bucket="needs_decision",
+        reason="standalone",
+        location="1 Main St",
+        start=start,
+        end=start + timedelta(hours=1),
+        legs=(
+            TransitLeg(
+                direction="outbound", origin=origin, destination="1 Main St", arrive_by=start
+            ),
+        ),
+    )
+
+
+def test_a_meeting_leg_that_cannot_route_is_held():
+    blocks, _skipped, held = meeting_desired_blocks([_meeting()], route=lambda o, d: None)
+    assert blocks == []
+    assert [(leg.identity, leg.kind) for leg in held] == [("m1", "meeting_outbound")]
+    assert held[0].summary == "Drive: Dentist"
+
+
+def test_a_meeting_at_its_own_origin_is_dropped_not_held():
+    _blocks, _skipped, held = meeting_desired_blocks(
+        [_meeting(origin="1 Main St")], route=lambda o, d: timedelta(minutes=10)
+    )
+    assert held == []
+
+
+def _trip():
+    check_in = NOW + timedelta(days=2)
+    return DriveTrip(
+        key="trip-1",
+        summary="Lake weekend",
+        hotel="Lodge",
+        address="9 Lake Rd",
+        check_in=check_in,
+        check_out=check_in + timedelta(days=2),
+        span_start=check_in,
+        span_end=check_in + timedelta(days=2),
+        expires=check_in + timedelta(days=4),
+    )
+
+
+def test_a_lodging_trip_that_cannot_route_holds_both_legs():
+    blocks, _skipped, _plans, held = lodging_desired_blocks(
+        [_trip()], route=lambda o, d: None, home_address=HOME, verdicts={}, now=NOW
+    )
+    assert blocks == []
+    assert sorted(leg.kind for leg in held) == sorted([KIND_OUTBOUND, KIND_RETURN])
+
+
+# --- the operator notice -------------------------------------------------------
+
+
+@pytest.fixture
+def state_dir(tmp_path, monkeypatch):
+    monkeypatch.setenv("DRIVE_PLANNER_STATE_DIR", str(tmp_path))
+    return tmp_path
+
+
+def _held(when=NOW + timedelta(days=13), identity="BNA-LGA-20261102T1840Z"):
+    return HeldLeg(
+        identity=identity,
+        kind="airport_departure",
+        summary="Drive: → BNA",
+        when=when,
+        reason=f"departure {identity}: route failed",
+    )
+
+
+def test_a_missing_drive_is_announced_once_after_an_hour(state_dir):
+    leg = _held()
+    assert unplanned_notices.due_notices([leg], now=NOW) == []
+    assert unplanned_notices.due_notices([leg], now=NOW + timedelta(minutes=30)) == []
+    assert unplanned_notices.due_notices([leg], now=NOW + timedelta(minutes=60)) == [leg]
+    assert unplanned_notices.due_notices([leg], now=NOW + timedelta(minutes=90)) == []
+
+
+def test_a_drive_that_plans_again_is_news_when_it_fails_again(state_dir):
+    leg = _held()
+    unplanned_notices.due_notices([leg], now=NOW)
+    unplanned_notices.due_notices([leg], now=NOW + timedelta(hours=1))
+    unplanned_notices.due_notices([], now=NOW + timedelta(hours=2))
+    assert unplanned_notices.due_notices([leg], now=NOW + timedelta(hours=3)) == []
+    assert unplanned_notices.due_notices([leg], now=NOW + timedelta(hours=4)) == [leg]
+
+
+def test_a_drive_beyond_the_horizon_or_past_is_not_announced(state_dir):
+    far = _held(when=NOW + timedelta(days=60))
+    past = _held(when=NOW - timedelta(hours=1), identity="past")
+    for hour in (0, 1, 2):
+        assert unplanned_notices.due_notices([far, past], now=NOW + timedelta(hours=hour)) == []
+
+
+def test_an_unreadable_notice_file_starts_fresh_and_says_so(state_dir, capsys):
+    (state_dir / "unplanned-notices.json").write_text("{nope", encoding="utf-8")
+    assert unplanned_notices.due_notices([_held()], now=NOW) == []
+    assert "unreadable" in capsys.readouterr().err
+    stored = json.loads((state_dir / "unplanned-notices.json").read_text(encoding="utf-8"))
+    assert stored["schema_version"] == 1 and len(stored["legs"]) == 1
+
+
+def test_only_held_legs_without_a_block_are_missing():
+    kept, missing = _held(identity="kept"), _held(identity="missing")
+    current = [_block("kept", "airport_departure")]
+    assert reconcile_sweep._missing([kept, missing], current) == [missing]
+
+
+def test_the_notice_line_reads_in_the_operator_zone():
+    line = reconcile_sweep._unplanned_line(
+        _held(when=datetime(2026, 11, 2, 17, 40, tzinfo=UTC)), "America/Chicago"
+    )
+    assert line == "Couldn't plan Drive: → BNA (Mon Nov 02, 11:40): route failed"
+
+
+def test_unplanned_lines_reach_the_rendered_notice():
+    applied = types.SimpleNamespace(
+        added_meeting_legs=[],
+        material_updates=[],
+        created=0,
+        updated=0,
+        deleted=0,
+        converted=0,
+        deferred=0,
+        errors=[],
+    )
+    payload = reconcile_sweep.build_sweep_payload(applied, [], [], ["Couldn't plan X: why"])
+    assert payload["data"]["message"] == "Couldn't plan X: why"
+    assert payload["data"]["unplanned"] == ["Couldn't plan X: why"]
+
+
+def test_a_notice_store_that_cannot_be_written_costs_only_the_notice(monkeypatch, capsys):
+    def broken(_missing, *, now):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(reconcile_sweep, "due_notices", broken)
+    assert reconcile_sweep._unplanned_notices((_held(),), [], now=NOW) == []
+    assert "no unplanned-drive notice" in capsys.readouterr().err
+
+
+def test_desired_block_type_is_unchanged_by_a_hold():
+    """A held key never suppresses a desired leg of the same key."""
+    block = DesiredBlock(
+        identity="a",
+        kind="airport_departure",
+        summary="Drive: → BNA",
+        start=NOW,
+        end=NOW + timedelta(minutes=40),
+        origin=HOME,
+        destination="BNA airport",
+        baseline_seconds=2400,
+        anchor=NOW + timedelta(minutes=40),
+    )
+    plan = plan_reconcile([block], [], held=frozenset({("a", "airport_departure")}))
+    assert len(plan.creates) == 1

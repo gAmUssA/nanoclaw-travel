@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import traceback
 from collections.abc import Callable
@@ -39,6 +40,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 _BUNDLE_DIR = Path(__file__).resolve().parent
 if str(_BUNDLE_DIR) not in sys.path:
@@ -63,11 +65,16 @@ from meeting_source import (  # noqa: E402
     meeting_desired_blocks,
 )
 from normalize import flight_from_byair  # noqa: E402
-from reconcile import DesiredBlock, ReconcilePlan  # noqa: E402
+from reconcile import DesiredBlock, HeldLeg, ReconcilePlan  # noqa: E402
 from shadow import plan_counts, render_plan  # noqa: E402
 from tripit_flights import flights_from_schedule  # noqa: E402
+from unplanned_notices import due_notices  # noqa: E402
 
 RouteFn = Callable[[str, str], "timedelta | None"]
+
+# An airport endpoint routed by name (`engine._airport_place`) because byAir gave
+# no coordinates for it.
+_TEXT_AIRPORT = re.compile(r"[A-Z]{3} airport")
 
 # The engine owns ONLY its own (unified) blocks for now; it never converges or
 # deletes legacy drive-planner / flight-assist blocks (the operator cleans those
@@ -156,6 +163,18 @@ def make_route(
         except (MapsError, urllib.error.URLError, TimeoutError):
             memo[key] = None
             return None
+        if tt.source != "google" and (
+            _TEXT_AIRPORT.fullmatch(origin) or _TEXT_AIRPORT.fullmatch(destination)
+        ):
+            # The backup geocoded "SFO airport" as the town of Airport, MO (#334).
+            # A text airport is trusted from the primary only; the leg is held.
+            print(
+                f"[drive-engine] route {origin} → {destination}: {tt.source} answer for a "
+                f"text airport ({tt.origin_resolved} → {tt.destination_resolved}) refused",
+                file=sys.stderr,
+            )
+            memo[key] = None
+            return None
         seconds = (
             tt.in_traffic_seconds if tt.in_traffic_seconds is not None else tt.duration_seconds
         )
@@ -172,12 +191,15 @@ class ResolvedAirport:
     flag: str | None = None
     delay_index: str | None = None
     timezone: str | None = None
+    lat: float | None = None
+    lon: float | None = None
 
 
 @dataclass(frozen=True)
 class PlanResult:
     plan: ReconcilePlan
     skipped: tuple[str, ...] = field(default_factory=tuple)
+    held: tuple[HeldLeg, ...] = field(default_factory=tuple)
 
 
 def build_plan(
@@ -195,6 +217,7 @@ def build_plan(
     tripit_flights: list | None = None,
     boarding_present: Callable | None = None,
     lodging_blocks: list[DesiredBlock] | None = None,
+    held: list[HeldLeg] | None = None,
 ) -> PlanResult:
     """Assemble the combined (airport + meeting + lodging) reconcile plan.
 
@@ -204,7 +227,9 @@ def build_plan(
     survives; the pre-built `meeting_blocks` and `lodging_blocks` are folded in
     as extra desired blocks so all three diff against the calendar in ONE
     reconcile. Anything left out of that single diff would be orphan-deleted by
-    it. `boarding_present` gates trivial-leg suppression (V3).
+    it, which is why `held` carries the meeting and lodging legs those sources
+    could not compute: their blocks are kept (#334). `boarding_present` gates
+    trivial-leg suppression (V3).
     """
     flights = list(tripit_flights or [])
     airport_info: dict[str, AirportInfo] = {}
@@ -224,10 +249,18 @@ def build_plan(
             skipped.append(str(exc))
             continue
         airport_info[dep.iata] = AirportInfo(
-            flag=dep.flag, delay_index=dep.delay_index, timezone=dep.timezone
+            flag=dep.flag,
+            delay_index=dep.delay_index,
+            timezone=dep.timezone,
+            lat=dep.lat,
+            lon=dep.lon,
         )
         airport_info[arr.iata] = AirportInfo(
-            flag=arr.flag, delay_index=arr.delay_index, timezone=arr.timezone
+            flag=arr.flag,
+            delay_index=arr.delay_index,
+            timezone=arr.timezone,
+            lat=arr.lat,
+            lon=arr.lon,
         )
 
     result = build_reconcile_plan(
@@ -242,9 +275,10 @@ def build_plan(
         live_origin=live_origin,
         boarding_present=boarding_present,
         extra_desired=meeting_blocks + list(lodging_blocks or []),
+        extra_held=list(held or []),
         managed_legacy=_MANAGED_LEGACY,
     )
-    return PlanResult(plan=result.plan, skipped=tuple(skipped) + result.skipped)
+    return PlanResult(plan=result.plan, skipped=tuple(skipped) + result.skipped, held=result.held)
 
 
 # --- real-client wiring (I/O) -----------------------------------------------
@@ -364,6 +398,7 @@ def render_notification(
     material_updates: list[dict],
     added_meeting_drives: list[dict],
     drive_or_fly_questions: list[str] | None = None,
+    unplanned: list[str] | None = None,
 ) -> str | None:
     """Render the operator notice deterministically from the sweep's structured
     material — the fixed one-liners the wake agent used to compose by hand (#187).
@@ -383,7 +418,9 @@ def render_notification(
     `drive_or_fly_questions` are the already-composed questions
     `lodging_source.build_question` produced for flight-less trips whose drive
     time is ambiguous. They are appended verbatim for the same reason the rest
-    of this notice is fixed text: the wake agent relays, it does not compose."""
+    of this notice is fixed text: the wake agent relays, it does not compose.
+    `unplanned` are the already-composed lines for drives the engine has failed
+    to plan for an hour and that have no block (#334), appended the same way."""
     lines: list[str] = []
     for u in material_updates:
         lines.append(
@@ -404,11 +441,15 @@ def render_notification(
         for i, d in enumerate(added_meeting_drives, start=1):
             lines.append(f"{i}. {d['meeting']} at {d['when']}")
     lines.extend(drive_or_fly_questions or [])
+    lines.extend(unplanned or [])
     return "\n".join(lines) if lines else None
 
 
 def build_sweep_payload(
-    applied, skipped: list[str], drive_or_fly_questions: list[str] | None = None
+    applied,
+    skipped: list[str],
+    drive_or_fly_questions: list[str] | None = None,
+    unplanned: list[str] | None = None,
 ) -> dict:
     """Assemble the sweep's stdout payload from an ApplyResult.
 
@@ -417,7 +458,8 @@ def build_sweep_payload(
 
     A notice is emitted ONLY when the operator has something to act on: a new
     MEETING drive (which they can skip), a MATERIAL drive-time change (leave
-    earlier / later), or a drive-or-fly question about a flight-less trip.
+    earlier / later), a drive-or-fly question about a flight-less trip, or a
+    drive the engine has failed to plan for an hour that has no block (#334).
     Removes, airport-drive adds, lodging-drive adds, converts, and routine
     sub-threshold re-times all apply SILENTLY — no message, so the host stays
     quiet (the noise this gating exists to kill). `applied` is a
@@ -436,6 +478,7 @@ def build_sweep_payload(
     added = _group_meeting_adds(applied.added_meeting_legs)
     material = _dedup_material(applied.material_updates)
     questions = list(drive_or_fly_questions or [])
+    unplanned_lines = list(unplanned or [])
     return {
         # Never wake for a notice: the host sends `data.message` verbatim
         # off the `wake_agent: false` branch (#285). A sweep with nothing
@@ -452,7 +495,8 @@ def build_sweep_payload(
             "added_meeting_drives": added,
             "material_updates": material,
             "drive_or_fly_questions": questions,
-            "message": render_notification(material, added, questions),
+            "unplanned": unplanned_lines,
+            "message": render_notification(material, added, questions, unplanned_lines),
             "deferred": applied.deferred,
             "skipped": len(skipped),
             "errors": len(applied.errors),
@@ -501,6 +545,7 @@ def finish_sweep(
     calendar,
     apply: Callable = apply_plan,
     drive_or_fly_questions: list[str] | None = None,
+    unplanned: list[str] | None = None,
     now: datetime | None = None,
 ) -> dict:
     """Shadow-render or apply the plan, and return the sweep's stdout payload.
@@ -543,7 +588,7 @@ def finish_sweep(
     for line in applied.errors:
         print(f"[drive-engine] error: {line}", file=sys.stderr)
 
-    return build_sweep_payload(applied, skipped, drive_or_fly_questions)
+    return build_sweep_payload(applied, skipped, drive_or_fly_questions, unplanned)
 
 
 class _AirportCtx(Protocol):
@@ -561,6 +606,10 @@ class _AirportCtx(Protocol):
     def delay_index(self) -> str | None: ...
     @property
     def timezone(self) -> str | None: ...
+    @property
+    def lat(self) -> float | None: ...
+    @property
+    def lon(self) -> float | None: ...
 
 
 class AirportUnresolved(Exception):
@@ -583,7 +632,12 @@ def _resolved_from_static(static: StaticAirport) -> ResolvedAirport:
     `delay.index`. The safe fallback whenever a live byAir fetch can't improve on
     what the cross-sweep cache already holds."""
     return ResolvedAirport(
-        iata=static.iata, flag=static.flag, delay_index=None, timezone=static.timezone
+        iata=static.iata,
+        flag=static.flag,
+        delay_index=None,
+        timezone=static.timezone,
+        lat=static.lat,
+        lon=static.lon,
     )
 
 
@@ -604,11 +658,12 @@ def _resolve_one_airport(
     - `new_static` is a `StaticAirport` the caller should persist when this call
       learned a fresh real IATA (differing from `static`), else None.
 
-    A warm static hit that needs no delay is served with ZERO fetches. Otherwise
-    `fetch()` performs the byAir round trip (returning None on failure); the live
-    `delay.index` is carried only when `want_delay`, and never persisted (it is
-    not static)."""
-    if static is not None and not want_delay:
+    A warm static hit that needs no delay and carries coordinates is served with
+    ZERO fetches. A hit without coordinates (a version-1 cache entry, #334) is
+    refetched so the airport can be routed by them. Otherwise `fetch()` performs
+    the byAir round trip (returning None on failure); the live `delay.index` is
+    carried only when `want_delay`, and never persisted (it is not static)."""
+    if static is not None and not want_delay and static.has_coordinates:
         return _resolved_from_static(static), None
     ctx = fetch()
     if ctx is None or ctx.code is None:
@@ -624,8 +679,12 @@ def _resolve_one_airport(
         flag=ctx.flag,
         delay_index=ctx.delay_index if want_delay else None,
         timezone=ctx.timezone,
+        lat=ctx.lat,
+        lon=ctx.lon,
     )
-    fresh = StaticAirport(iata=ctx.code, flag=ctx.flag, timezone=ctx.timezone)
+    fresh = StaticAirport(
+        iata=ctx.code, flag=ctx.flag, timezone=ctx.timezone, lat=ctx.lat, lon=ctx.lon
+    )
     new_static = fresh if static != fresh else None
     return resolved, new_static
 
@@ -805,10 +864,11 @@ def _plan_lodging_legs(
     now: datetime,
     meeting_blocks: list[DesiredBlock],
     verdicts: dict | None = None,
-) -> tuple[list[DesiredBlock], list[str], list[str], list[DesiredBlock]]:
+) -> tuple[list[DesiredBlock], list[str], list[str], list[DesiredBlock], list[HeldLeg]]:
     """Plan the getting-there legs of every flight-less trip. The I/O half.
 
-    Returns `(blocks, skipped, questions, kept_meeting_blocks)`.
+    Returns `(blocks, skipped, questions, kept_meeting_blocks, held)`, `held`
+    the legs that exist but could not be computed this sweep (#334).
     `lodging_source` decides; this function supplies it the stored verdicts and
     writes back what it decided, keeping the verdict-store reads and writes out
     of the pure module.
@@ -830,11 +890,11 @@ def _plan_lodging_legs(
 
     trips = find_drive_trips(schedule, now=now, window=SWEEP_WINDOW)
     if not trips:
-        return [], [], [], meeting_blocks
+        return [], [], [], meeting_blocks, []
 
     if verdicts is None:
         verdicts = load_verdicts(now)
-    blocks, skipped, plans = lodging_desired_blocks(
+    blocks, skipped, plans, held = lodging_desired_blocks(
         trips,
         route=route,
         home_address=home,
@@ -861,7 +921,7 @@ def _plan_lodging_legs(
     kept = [block for block in meeting_blocks if (block.identity, block.kind) not in absorbed]
     for identity, kind in sorted(absorbed):
         skipped.append(f"meeting {identity} {kind}: absorbed into the trip's own drive")
-    return blocks, skipped, questions, kept
+    return blocks, skipped, questions, kept, held
 
 
 def _run_sweep() -> dict:
@@ -963,6 +1023,8 @@ def _run_sweep() -> dict:
     # conditional-expression short-circuit is too subtle to rely on.
     sweep_verdicts: dict | None = None
     meeting_skipped: list[str] = []
+    meeting_held: list[HeldLeg] = []
+    operator_zone: str | None = None
     if home:
         fetcher = CalendarFetcher()
         events = exclude_drive_block_events(
@@ -1013,7 +1075,8 @@ def _run_sweep() -> dict:
         # unavailable zone keeps each meeting's own (the reader says why on
         # stderr).
         operator = read_operator_tz()
-        meeting_blocks, meeting_skipped = meeting_desired_blocks(
+        operator_zone = operator.tz if operator is not None else None
+        meeting_blocks, meeting_skipped, meeting_held = meeting_desired_blocks(
             meetings,
             route=route,
             driving_to=_trip_presence(driving, meetings, route=route),
@@ -1029,7 +1092,13 @@ def _run_sweep() -> dict:
     # Runs after the meeting side because it reads the local drives already
     # planned: the outbound leg must land before the first of them leaves the
     # hotel, not merely by TripIt's nominal check-in stamp.
-    lodging_blocks, lodging_skipped, drive_or_fly_questions, meeting_blocks = _plan_lodging_legs(
+    (
+        lodging_blocks,
+        lodging_skipped,
+        drive_or_fly_questions,
+        meeting_blocks,
+        lodging_held,
+    ) = _plan_lodging_legs(
         schedule=schedule,
         home=home,
         route=route,
@@ -1109,9 +1178,11 @@ def _run_sweep() -> dict:
         home_address=home,
         home_metros=home_metros,
         live_origin=live_origin,
+        held=meeting_held + lodging_held,
     )
 
     skipped = list(result.skipped) + list(meeting_skipped) + list(lodging_skipped)
+    unplanned = _unplanned_notices(result.held, current_blocks, now=now)
 
     # Persist any newly-resolved static airport facts for the next warm sweep —
     # best-effort, never a gate on applying a valid plan (see helper).
@@ -1123,8 +1194,52 @@ def _run_sweep() -> dict:
         skipped,
         calendar=calendar,
         drive_or_fly_questions=drive_or_fly_questions,
+        unplanned=[_unplanned_line(leg, operator_zone) for leg in unplanned],
         now=now,
     )
+
+
+def _missing(
+    held: tuple[HeldLeg, ...] | list[HeldLeg], current: list[ParsedBlock]
+) -> list[HeldLeg]:
+    """The held legs with no block of their own on the calendar — drives that
+    are simply absent, not kept."""
+    present = {(block.identity, block.kind) for block in current if block.identity is not None}
+    return [leg for leg in held if leg.key not in present]
+
+
+def _unplanned_notices(
+    held: tuple[HeldLeg, ...], current: list[ParsedBlock], *, now: datetime
+) -> list[HeldLeg]:
+    """The missing legs due a notice this sweep (`unplanned_notices.due_notices`).
+
+    A notice store that cannot be written costs this sweep's notices, never the
+    plan: the legs stay held and the next sweep tries again."""
+    try:
+        return due_notices(_missing(held, current), now=now)
+    except OSError as exc:
+        print(
+            f"[drive-engine] unplanned-notices could not be recorded ({exc}); "
+            "no unplanned-drive notice this sweep",
+            file=sys.stderr,
+        )
+        return []
+
+
+def _unplanned_line(leg: HeldLeg, zone: str | None) -> str:
+    """One operator line for a drive the engine cannot plan: the drive, when,
+    and the reason after the leg's diagnostic tag."""
+    when = ""
+    if leg.when is not None:
+        local = leg.when
+        if zone:
+            try:
+                local = leg.when.astimezone(ZoneInfo(zone))
+            except (ZoneInfoNotFoundError, ValueError):
+                local = leg.when.astimezone(UTC)
+        when = f" ({local.strftime('%a %b %d, %H:%M')})"
+    reason = leg.reason.split(": ", 1)[1] if ": " in leg.reason else leg.reason
+    return f"Couldn't plan {leg.summary}{when}: {reason}"
 
 
 def main() -> int:

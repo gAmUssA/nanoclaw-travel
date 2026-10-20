@@ -19,6 +19,14 @@ Three defect classes from the design collapse into this one diff:
   desired leg is deleted, not merely left alone. This is what clears a suppressed
   connection's stale drives (the 7× CPH storm) and pre-filter orphans, rather than
   only ceasing to create.
+
+A leg the engine could not compute this sweep — its route failed, its position
+was unresolved, its drive came out implausible, or its drive window has passed —
+is HELD, not gone (#334). Its existing blocks are left exactly as they are:
+neither updated nor orphan-deleted. Only a leg that no longer exists (the flight
+or meeting is gone, or a deliberate suppression such as a trivial drive) lets
+its block be deleted. A provider blip used to read as "this drive no longer
+exists" and deleted thirteen correct blocks in one sweep.
 """
 
 from __future__ import annotations
@@ -34,12 +42,10 @@ _KIND_TO_LEGACY_DIRECTION = {
     "airport_arrival": "from_airport",
 }
 
-# The legacy block generations the engine currently OWNS and may converge or
-# orphan-delete. Today the engine produces only airport legs, so it owns just the
-# flight-assist airport blocks (fadrive). Drive-planner MEETING blocks (dp) are NOT
-# owned yet — the engine has no meeting-leg source — so they are left completely
-# untouched (never orphaned), never mistaken for airport-leg garbage. When the
-# meeting source lands, add GEN_LEGACY_DP to the managed set.
+# The default set of legacy block generations a caller lets the engine converge or
+# orphan-delete. The live sweep overrides it with an empty set
+# (`reconcile_sweep._MANAGED_LEGACY`): the retired engines' blocks are left for the
+# operator to clean up.
 _DEFAULT_MANAGED_LEGACY = frozenset({GEN_LEGACY_FADRIVE})
 
 
@@ -82,6 +88,26 @@ def legacy_keys_for_airport_leg(
     if direction is None:
         return frozenset()
     return frozenset((GEN_LEGACY_FADRIVE, str(fid), direction) for fid in byair_flight_ids)
+
+
+@dataclass(frozen=True)
+class HeldLeg:
+    """A leg that exists but could not be computed this sweep (#334).
+
+    `identity` and `kind` key it like a `DesiredBlock`, so its current blocks are
+    found and left untouched. `summary`, `when` (the leg's anchor) and `reason`
+    describe it for the operator when no block exists to hold.
+    """
+
+    identity: str
+    kind: str
+    summary: str
+    when: datetime | None
+    reason: str
+
+    @property
+    def key(self) -> tuple[str, str]:
+        return (self.identity, self.kind)
 
 
 @dataclass(frozen=True)
@@ -252,15 +278,17 @@ def plan_reconcile(
     current: list[ParsedBlock],
     *,
     managed_legacy: frozenset[str] = _DEFAULT_MANAGED_LEGACY,
+    held: frozenset[tuple[str, str]] = frozenset(),
 ) -> ReconcilePlan:
     """Diff desired legs against current calendar blocks (#156 G1 / G7 / R4).
 
     `managed_legacy` is the set of legacy generations the engine owns and may
-    converge or orphan-delete; blocks of any other legacy generation (e.g.
-    drive-planner meeting blocks while the engine has no meeting-leg source) are
-    left entirely untouched — never orphaned. Pure and deterministic: output
-    action lists are ordered by the desired-leg order then the current-block
-    order, with no clock or ambient state.
+    converge or orphan-delete; blocks of any other legacy generation are left
+    entirely untouched — never orphaned. `held` are the `(identity, kind)` keys
+    of legs that exist but could not be computed this sweep (`HeldLeg`): their
+    current unified blocks are neither updated nor deleted. Pure and
+    deterministic: output action lists are ordered by the desired-leg order then
+    the current-block order, with no clock or ambient state.
     """
     creates: list[Create] = []
     updates: list[Update] = []
@@ -306,9 +334,10 @@ def plan_reconcile(
         else:
             creates.append(Create(d))
 
-    # Unified orphans: current unified blocks with no desired leg.
+    # Unified orphans: current unified blocks with no desired leg. A held leg
+    # still exists, so its blocks are not orphans (#334).
     for (identity, kind), blocks in unified_by_key.items():
-        if (identity, kind) not in desired_keys:
+        if (identity, kind) not in desired_keys and (identity, kind) not in held:
             for block in blocks:
                 deletes.append(Delete(block.event_id, "orphan: no desired leg"))
 

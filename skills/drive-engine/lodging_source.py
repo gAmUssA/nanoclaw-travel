@@ -69,7 +69,7 @@ from drive_decision import (  # noqa: E402
     TripVerdict,
 )
 from lodging import CHECK_IN, CHECK_OUT, hotel_name, lodging_role  # noqa: E402
-from reconcile import DesiredBlock  # noqa: E402
+from reconcile import DesiredBlock, HeldLeg  # noqa: E402
 from trip_key import trip_key  # noqa: E402
 from trip_origin import parse_schedule_time  # noqa: E402
 
@@ -631,34 +631,66 @@ def lodging_desired_blocks(
     verdicts: dict[str, TripVerdict],
     contexts: dict[str, TripContext] | None = None,
     now: datetime,
-) -> tuple[list[DesiredBlock], list[str], list[TripPlan]]:
+) -> tuple[list[DesiredBlock], list[str], list[TripPlan], list[HeldLeg]]:
     """Plan the getting-there legs for each flight-less trip.
 
-    Returns `(blocks, skipped_diagnostics, plans)`. `plans` carries every trip's
-    resolved verdict and the question owed on it, for the caller to persist and
-    send — this module writes no state and sends nothing.
+    Returns `(blocks, skipped_diagnostics, plans, held)`. `plans` carries every
+    trip's resolved verdict and the question owed on it, for the caller to
+    persist and send — this module writes no state and sends nothing.
 
     A trip yields blocks only when the effective verdict is a drive. A route
     failure or an unconfigured home skips the trip with a diagnostic rather than
-    guessing; a leg whose anchor has already passed is dropped the way
-    `engine._leg_past` drops a stale airport leg.
+    guessing, and so does a leg whose anchor has already passed, the way
+    `engine._leg_past` treats a stale airport leg. Each of those legs is HELD
+    (#334): its current block is kept rather than orphan-deleted. A trip the
+    verdict says is flown, or not yet decided, plans no leg and holds none.
     """
     blocks: list[DesiredBlock] = []
     skipped: list[str] = []
     plans: list[TripPlan] = []
+    held: list[HeldLeg] = []
     contexts = contexts or {}
 
+    def hold(trip: DriveTrip, kind: str, when: datetime | None, reason: str) -> None:
+        skipped.append(reason)
+        summary = (
+            f"Drive: home → {trip.hotel}"
+            if kind == KIND_OUTBOUND
+            else f"Drive: {trip.hotel} → home"
+        )
+        held.append(
+            HeldLeg(identity=trip.key, kind=kind, summary=summary, when=when, reason=reason)
+        )
+
     if home_address is None:
-        if trips:
-            skipped.append(
-                f"lodging legs: no home address configured — {len(trips)} drive trip(s) unplanned"
+        for trip in trips:
+            reason = f"lodging {trip.key}: no home address configured — unplanned"
+            hold(trip, KIND_OUTBOUND, trip.check_in, reason)
+            held.append(
+                HeldLeg(
+                    identity=trip.key,
+                    kind=KIND_RETURN,
+                    summary=f"Drive: {trip.hotel} → home",
+                    when=trip.check_out,
+                    reason=reason,
+                )
             )
-        return blocks, skipped, plans
+        return blocks, skipped, plans, held
 
     for trip in trips:
         outbound_drive = route(home_address, trip.address)
         if outbound_drive is None:
-            skipped.append(f"lodging {trip.key}: home→lodging route failed")
+            reason = f"lodging {trip.key}: home→lodging route failed"
+            hold(trip, KIND_OUTBOUND, trip.check_in, reason)
+            held.append(
+                HeldLeg(
+                    identity=trip.key,
+                    kind=KIND_RETURN,
+                    summary=f"Drive: {trip.hotel} → home",
+                    when=trip.check_out,
+                    reason=reason,
+                )
+            )
             continue
 
         band = classify_drive(outbound_drive)
@@ -707,7 +739,12 @@ def lodging_desired_blocks(
             else:
                 # The outbound is not planned, so a local drive it would have
                 # absorbed has to stand on its own.
-                skipped.append(f"lodging {trip.key} outbound: past, skipped")
+                hold(
+                    trip,
+                    KIND_OUTBOUND,
+                    outbound.anchor,
+                    f"lodging {trip.key} outbound: past, skipped",
+                )
 
             # Return. Mirror case: the last local drive comes BACK to a lodging
             # the operator has already checked out of, so leave from the venue.
@@ -735,14 +772,29 @@ def lodging_desired_blocks(
             if returning is None:
                 return_drive = route(trip.address, home_address)
                 if return_drive is None:
-                    skipped.append(f"lodging {trip.key}: lodging→home route failed")
+                    hold(
+                        trip,
+                        KIND_RETURN,
+                        trip.check_out,
+                        f"lodging {trip.key}: lodging→home route failed",
+                    )
                 else:
                     returning = _return_block(trip, ctx, return_drive, home_address)
                     if returning is None:
-                        skipped.append(f"lodging {trip.key} return: no check-out to depart after")
+                        hold(
+                            trip,
+                            KIND_RETURN,
+                            trip.check_out,
+                            f"lodging {trip.key} return: no check-out to depart after",
+                        )
             if returning is not None:
                 if returning.anchor < now:
-                    skipped.append(f"lodging {trip.key} return: past, skipped")
+                    hold(
+                        trip,
+                        KIND_RETURN,
+                        returning.anchor,
+                        f"lodging {trip.key} return: past, skipped",
+                    )
                 else:
                     trip_blocks.append(returning)
                     if absorbs_back is not None:
@@ -765,4 +817,4 @@ def lodging_desired_blocks(
             )
         )
 
-    return blocks, skipped, plans
+    return blocks, skipped, plans, held

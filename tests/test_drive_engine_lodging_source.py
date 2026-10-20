@@ -201,7 +201,7 @@ def test_classify_drive_bands(drive, expected):
 
 
 def test_a_short_drive_builds_both_legs_and_asks_nothing():
-    blocks, _skipped, plans = _plan(drive=timedelta(hours=2))
+    blocks, _skipped, plans, _held = _plan(drive=timedelta(hours=2))
     assert [b.kind for b in blocks] == [KIND_OUTBOUND, KIND_RETURN]
     assert plans[0].ask is None
     assert plans[0].effective == VERDICT_DRIVE
@@ -214,13 +214,13 @@ def test_a_short_drive_builds_both_legs_and_asks_nothing():
 def test_a_very_long_drive_builds_nothing_and_asks_nothing():
     """Above the band it is a flight; the missing-flight gap is the booking
     check's to report, so this side stays silent."""
-    blocks, _skipped, plans = _plan(drive=timedelta(hours=9))
+    blocks, _skipped, plans, _held = _plan(drive=timedelta(hours=9))
     assert blocks == []
     assert (plans[0].effective, plans[0].ask) == (VERDICT_FLY, None)
 
 
 def test_an_ambiguous_drive_asks_once_and_builds_nothing_meanwhile():
-    blocks, _skipped, plans = _plan(drive=timedelta(hours=3, minutes=40))
+    blocks, _skipped, plans, _held = _plan(drive=timedelta(hours=3, minutes=40))
     assert blocks == []
     assert plans[0].effective == VERDICT_UNKNOWN
     assert plans[0].ask is not None
@@ -237,7 +237,7 @@ def test_an_already_asked_trip_is_not_asked_again():
         asked_at=NOW - timedelta(hours=1),
         expires=CHECK_OUT + timedelta(days=2),
     )
-    _blocks, _skipped, plans = _plan(
+    _blocks, _skipped, plans, _held = _plan(
         drive=timedelta(hours=3, minutes=40), verdicts={TRIP_KEY: asked}
     )
     assert plans[0].ask is None
@@ -255,7 +255,7 @@ def test_an_operator_answer_settles_the_ambiguous_band(answer, expect_blocks):
         asked_at=NOW - timedelta(hours=1),
         expires=CHECK_OUT + timedelta(days=2),
     )
-    blocks, _skipped, plans = _plan(
+    blocks, _skipped, plans, _held = _plan(
         drive=timedelta(hours=3, minutes=40), verdicts={TRIP_KEY: verdict}
     )
     assert bool(blocks) is expect_blocks
@@ -273,7 +273,7 @@ def test_an_operator_answer_outranks_the_drive_time_band():
         asked_at=None,
         expires=CHECK_OUT + timedelta(days=2),
     )
-    blocks, _skipped, plans = _plan(drive=timedelta(hours=9), verdicts={TRIP_KEY: verdict})
+    blocks, _skipped, plans, _held = _plan(drive=timedelta(hours=9), verdicts={TRIP_KEY: verdict})
     assert [b.kind for b in blocks] == [KIND_OUTBOUND, KIND_RETURN]
     assert plans[0].verdict == VERDICT_FLY  # what the band alone said
     assert plans[0].effective == VERDICT_DRIVE  # what the operator said
@@ -285,7 +285,7 @@ def test_an_operator_answer_outranks_the_drive_time_band():
 
 
 def test_outbound_lands_by_checkin_when_no_local_drive_exists():
-    blocks, _skipped, _plans = _plan(drive=timedelta(hours=2))
+    blocks, _skipped, _plans, _held = _plan(drive=timedelta(hours=2))
     outbound = blocks[0]
     assert outbound.end == CHECK_IN
     assert outbound.start == CHECK_IN - timedelta(hours=2)
@@ -300,7 +300,7 @@ def test_outbound_lands_by_the_onward_drive_not_the_nominal_checkin():
             onward_start=onward, trailing_end=CHECK_IN, timezone="America/New_York"
         )
     }
-    blocks, _skipped, _plans = _plan(drive=timedelta(hours=2), contexts=ctx)
+    blocks, _skipped, _plans, _held = _plan(drive=timedelta(hours=2), contexts=ctx)
     outbound = blocks[0]
     assert outbound.end == onward
     assert outbound.timezone == "America/New_York"
@@ -311,14 +311,14 @@ def test_return_departs_after_a_local_drive_that_outlasts_checkout():
     plan it straight across the event."""
     trailing = CHECK_OUT + timedelta(hours=4)
     ctx = {TRIP_KEY: TripContext(trailing_end=trailing)}
-    blocks, _skipped, _plans = _plan(drive=timedelta(hours=2), contexts=ctx)
+    blocks, _skipped, _plans, _held = _plan(drive=timedelta(hours=2), contexts=ctx)
     returning = blocks[1]
     assert returning.start == trailing
     assert returning.end == trailing + timedelta(hours=2)
 
 
 def test_return_departs_at_checkout_when_nothing_trails_it():
-    blocks, _skipped, _plans = _plan(drive=timedelta(hours=2))
+    blocks, _skipped, _plans, _held = _plan(drive=timedelta(hours=2))
     assert blocks[1].start == CHECK_OUT
 
 
@@ -391,7 +391,7 @@ def test_context_counts_a_local_drive_after_check_out():
     ctx = context_from_blocks(trips, [evening_out, evening_back])[TRIP_KEY]
     assert ctx.trailing_end == evening_back.end
 
-    blocks, _skipped, _plans = _plan(drive=timedelta(hours=2), contexts={TRIP_KEY: ctx})
+    blocks, _skipped, _plans, _held = _plan(drive=timedelta(hours=2), contexts={TRIP_KEY: ctx})
     # Departs the STADIUM as that last drive would have set off, not the hotel
     # when it would have arrived: the room is already released, so the drive
     # back to it is absorbed. What this test pins either way is that the return
@@ -432,7 +432,7 @@ def _venue_router(*, home_hotel, home_venue, hotel_home, venue_home):
 def _plan_with_venue(local_blocks, **route_kw):
     trips = find_drive_trips(_schedule(), now=NOW, window=timedelta(days=30))
     ctx = context_from_blocks(trips, local_blocks)[TRIP_KEY]
-    blocks, skipped, plans = lodging_desired_blocks(
+    blocks, skipped, plans, _held = lodging_desired_blocks(
         trips,
         route=_venue_router(**route_kw),
         home_address=HOME,
@@ -598,7 +598,7 @@ def test_context_ignores_blocks_anchored_outside_the_stay():
 
 def test_a_failed_outbound_route_skips_the_trip_with_a_diagnostic():
     trips = find_drive_trips(_schedule(), now=NOW, window=timedelta(days=30))
-    blocks, skipped, plans = lodging_desired_blocks(
+    blocks, skipped, plans, _held = lodging_desired_blocks(
         trips,
         route=_router(out=None),
         home_address=HOME,
@@ -616,7 +616,7 @@ def test_a_failed_return_route_keeps_the_outbound_leg():
     def route(origin: str, _destination: str):
         return timedelta(hours=2) if origin == HOME else None
 
-    blocks, skipped, _plans = lodging_desired_blocks(
+    blocks, skipped, _plans, _held = lodging_desired_blocks(
         trips, route=route, home_address=HOME, verdicts={}, now=NOW
     )
     assert [b.kind for b in blocks] == [KIND_OUTBOUND]
@@ -625,7 +625,7 @@ def test_a_failed_return_route_keeps_the_outbound_leg():
 
 def test_no_home_address_plans_nothing_and_says_so():
     """Guessing an origin would mis-time every leg; refuse loudly instead."""
-    blocks, skipped, plans = _plan(drive=timedelta(hours=2), home=None)
+    blocks, skipped, plans, _held = _plan(drive=timedelta(hours=2), home=None)
     assert blocks == [] and plans == []
     assert any("no home address configured" in s for s in skipped)
 
@@ -633,7 +633,7 @@ def test_no_home_address_plans_nothing_and_says_so():
 def test_a_past_outbound_is_dropped_while_the_return_still_builds():
     """Mid-trip the drive there has already happened; the drive home has not."""
     mid_trip = CHECK_IN + timedelta(hours=6)
-    blocks, skipped, _plans = _plan(drive=timedelta(hours=2), now=mid_trip)
+    blocks, skipped, _plans, _held = _plan(drive=timedelta(hours=2), now=mid_trip)
     assert [b.kind for b in blocks] == [KIND_RETURN]
     assert any("outbound: past" in s for s in skipped)
 
@@ -641,7 +641,7 @@ def test_a_past_outbound_is_dropped_while_the_return_still_builds():
 def test_both_legs_carry_the_trip_key_as_identity():
     """Reconcile keys on (identity, kind); sharing the trip key is what makes a
     re-plan update the same two blocks instead of stacking new ones."""
-    blocks, _skipped, _plans = _plan(drive=timedelta(hours=2))
+    blocks, _skipped, _plans, _held = _plan(drive=timedelta(hours=2))
     assert {b.identity for b in blocks} == {TRIP_KEY}
     assert len({b.kind for b in blocks}) == 2
 
@@ -698,7 +698,9 @@ def test_an_orphan_checkin_still_gets_a_return_leg_from_its_trailing_drive():
     drive home follows — dropping it stranded the operator at the hotel."""
     trailing_end = CHECK_IN + timedelta(hours=5)
     ctx = {TRIP_KEY: TripContext(trailing_end=trailing_end)}
-    blocks, _skipped, _plans = _plan(_orphan_schedule(), drive=timedelta(hours=2), contexts=ctx)
+    blocks, _skipped, _plans, _held = _plan(
+        _orphan_schedule(), drive=timedelta(hours=2), contexts=ctx
+    )
     assert [b.kind for b in blocks] == [KIND_OUTBOUND, KIND_RETURN]
     assert blocks[1].start == trailing_end
 
@@ -706,7 +708,7 @@ def test_an_orphan_checkin_still_gets_a_return_leg_from_its_trailing_drive():
 def test_an_orphan_checkin_with_no_local_drives_plans_no_return():
     """Nothing to anchor on: the trip wrapper's date-only midnight is a worse
     departure time than none, so the leg is skipped with a diagnostic."""
-    blocks, skipped, _plans = _plan(_orphan_schedule(), drive=timedelta(hours=2))
+    blocks, skipped, _plans, _held = _plan(_orphan_schedule(), drive=timedelta(hours=2))
     assert [b.kind for b in blocks] == [KIND_OUTBOUND]
     assert any("no check-out to depart after" in s for s in skipped)
 
@@ -782,7 +784,7 @@ def _outer_legs(check_in, blocks):
     ]
     trips = find_drive_trips(schedule, now=NOW, window=timedelta(days=30))
     ctx = context_from_blocks(trips, blocks)[TRIP_KEY]
-    out, _skipped, plans = lodging_desired_blocks(
+    out, _skipped, plans, _held = lodging_desired_blocks(
         trips,
         route=_venue_router(
             home_hotel=timedelta(hours=2),
