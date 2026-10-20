@@ -14,9 +14,11 @@ within `NOTICE_HORIZON` count; a drive months out has time to resolve itself.
 Hint, not authority (`coding-policy: stateful-artifacts`): a missing,
 unreadable or older-version file reads as "nothing noticed yet", with a stderr
 diagnostic for anything but a plain missing file. The cost is one repeated
-notice, never a missed drive. A file of a newer version belongs to a newer
-engine: it is left untouched and this sweep sends no notice, rather than
-announce every missing drive on every sweep. Schema in `state-schema.md`.
+notice, never a missed drive. A file of a newer version is no usable prior
+state too, but belongs to a newer engine and is never written: read as
+nothing noticed yet each sweep, no leg outlasts `PERSIST_BEFORE_NOTICE`, so no
+notice goes out (never one per sweep) until this reader is updated. Schema in
+`state-schema.md`.
 """
 
 from __future__ import annotations
@@ -142,16 +144,17 @@ def due_notices(missing: list[HeldLeg], *, now: datetime) -> list[HeldLeg]:
     """
     if now.tzinfo is None:
         raise ValueError("due_notices: `now` must be timezone-aware")
+    writable = True
     try:
         entries = _load()
     except _NewerStore as exc:
         print(
             f"[drive-engine] unplanned-notices {exc}, newer than this engine's "
-            f"{NOTICES_SCHEMA_VERSION}; leaving it untouched and sending no notice — "
-            "deploy the current nanoclaw-travel plugin",
+            f"{NOTICES_SCHEMA_VERSION}; reading it as nothing noticed yet and leaving it "
+            "untouched — deploy the current nanoclaw-travel plugin",
             file=sys.stderr,
         )
-        return []
+        entries, writable = {}, False
     current: dict[str, HeldLeg] = {}
     for leg in missing:
         if leg.when is None or not (now <= leg.when <= now + NOTICE_HORIZON):
@@ -170,6 +173,6 @@ def due_notices(missing: list[HeldLeg], *, now: datetime) -> list[HeldLeg]:
             due.append(leg)
         updated[key] = entry
 
-    if updated != entries:
+    if writable and updated != entries:
         _store(updated)
     return sorted(due, key=lambda leg: (leg.when or now, leg.identity))

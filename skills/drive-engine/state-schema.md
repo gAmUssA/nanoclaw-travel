@@ -116,7 +116,7 @@ Writer / reader contract:
 - **Writer / Reader** — the sweep calls `due_notices(missing, now=...)` once per sweep. An entry absent from this sweep's missing legs is dropped (the drive planned again, so a later failure is news again); an expired entry restarts its spell.
 - A write failure raises `OSError`; the sweep reports it on stderr and sends no unplanned-drive notice that sweep. The plan is unaffected.
 
-Tolerance — hint, not authority: a missing, unreadable, non-object or older-version file reads as "nothing noticed yet", with a stderr diagnostic for anything but a plain missing file. The cost is one repeated notice, never a missed drive. Malformed entries are dropped. A file of a newer `schema_version` belongs to a newer engine: `due_notices` leaves it byte-for-byte untouched and returns no notice, with a stderr diagnostic, until this reader is updated.
+Tolerance — hint, not authority: a missing, unreadable, non-object or older-version file reads as "nothing noticed yet", with a stderr diagnostic for anything but a plain missing file. The cost is one repeated notice, never a missed drive. Malformed entries are dropped. A file of a newer `schema_version` is no usable prior state as well, with a stderr diagnostic naming the upgrade, but it belongs to a newer engine and is never written: `due_notices` reads it as nothing noticed yet on every sweep and leaves it byte-for-byte untouched. With no first-seen time kept, no leg outlasts `PERSIST_BEFORE_NOTICE`, so no notice goes out (never one per sweep) until this reader is updated.
 
 Migration: `schema_version` `1` is the initial version.
 
