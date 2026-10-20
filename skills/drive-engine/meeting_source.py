@@ -35,7 +35,7 @@ if str(_BUNDLE_DIR) not in sys.path:
     sys.path.insert(0, str(_BUNDLE_DIR))
 
 from block_codec import GEN_LEGACY_DP, parse_block  # noqa: E402
-from reconcile import DesiredBlock  # noqa: E402
+from reconcile import DesiredBlock, HeldLeg  # noqa: E402
 from scan import same_place  # noqa: E402
 
 # A drive block's human summary always starts with this.
@@ -133,6 +133,34 @@ def _trip_endpoints(leg, presence: TripPresence | None) -> tuple[str, str]:
     return origin, destination
 
 
+# Scan buckets whose meeting still exists but whose legs cannot be planned now:
+# one already under way (its return drive may still be ahead), and one whose
+# time did not parse. Their blocks are kept, never orphan-deleted (#334). A
+# declined, cancelled, skipped or virtual meeting is deliberately driveless.
+_UNKNOWABLE_REASONS = frozenset({"missing or unparseable time"})
+
+
+def _legs_unknowable(meeting) -> bool:
+    bucket = getattr(meeting, "bucket", None)
+    return bucket == "past" or (
+        bucket == "filtered" and getattr(meeting, "reason", None) in _UNKNOWABLE_REASONS
+    )
+
+
+def _hold(skipped: list[str], held: list[HeldLeg], meeting, leg, kind: str, reason: str) -> None:
+    """Record a meeting leg that exists but could not be computed (#334)."""
+    skipped.append(reason)
+    held.append(
+        HeldLeg(
+            identity=meeting.meeting_id,
+            kind=kind,
+            summary=f"Drive: {meeting.summary}",
+            when=leg.arrive_by or leg.depart_after,
+            reason=reason,
+        )
+    )
+
+
 def meeting_desired_blocks(
     meetings: list,
     *,
@@ -140,13 +168,15 @@ def meeting_desired_blocks(
     max_reasonable_drive: timedelta = DEFAULT_MAX_REASONABLE_DRIVE,
     driving_to: dict[str, TripPresence] | None = None,
     display_tz: str | None = None,
-) -> tuple[list[DesiredBlock], list[str]]:
+) -> tuple[list[DesiredBlock], list[str], list[HeldLeg]]:
     """Turn scan `MeetingClass` results into unified meeting `DesiredBlock`s.
 
     Only actionable meetings carry legs, so pass the scan output directly. Returns
-    `(blocks, skipped_diagnostics)`. A leg is skipped (never blindly blocked) when
-    its anchor is unresolved, its route fails, or its routed drive exceeds
-    `max_reasonable_drive` (the travel-away suppression).
+    `(blocks, skipped_diagnostics, held)`. A leg is skipped (never blindly
+    blocked) when its anchor is unresolved, its route fails, or its routed drive
+    exceeds `max_reasonable_drive` (the travel-away suppression). Each of those
+    is also HELD (#334): the leg exists, so its current block is kept rather
+    than orphan-deleted. Only a leg whose origin is its destination is dropped.
 
     A leg whose origin IS its destination is skipped too (#301): the scan
     already filters a meeting held at the anchor, but the lodging rewrite below
@@ -182,13 +212,42 @@ def meeting_desired_blocks(
     presence = driving_to or {}
     blocks: list[DesiredBlock] = []
     skipped: list[str] = []
+    held: list[HeldLeg] = []
 
     for meeting in meetings:
+        if _legs_unknowable(meeting):
+            for kind in ("meeting_outbound", "meeting_return"):
+                held.append(
+                    HeldLeg(
+                        identity=meeting.meeting_id,
+                        kind=kind,
+                        summary=f"Drive: {meeting.summary}",
+                        when=(
+                            meeting.start
+                            if kind == "meeting_outbound"
+                            else meeting.end or meeting.start
+                        ),
+                        reason=f"meeting {meeting.meeting_id}: {meeting.reason}",
+                        announce=False,
+                    )
+                )
+            continue
         for leg in meeting.legs:
             tag = f"meeting {meeting.meeting_id} {leg.direction}"
+            kind = _DIRECTION_KIND.get(leg.direction)
+            if kind is None:
+                skipped.append(f"{tag}: unknown direction")
+                continue
+
             if leg.origin is None or leg.destination is None:
-                note = leg.anchor_note or "unresolved anchor"
-                skipped.append(f"{tag}: {note}")
+                _hold(
+                    skipped,
+                    held,
+                    meeting,
+                    leg,
+                    kind,
+                    f"{tag}: {leg.anchor_note or 'unresolved anchor'}",
+                )
                 continue
             origin, destination = _trip_endpoints(leg, presence.get(meeting.meeting_id))
             if same_place(origin, destination):
@@ -196,11 +255,18 @@ def meeting_desired_blocks(
                 continue
             drive = route(origin, destination)
             if drive is None:
-                skipped.append(f"{tag}: route failed")
+                _hold(skipped, held, meeting, leg, kind, f"{tag}: route failed")
                 continue
             if drive > max_reasonable_drive and meeting.meeting_id not in presence:
                 minutes = int(drive.total_seconds() // 60)
-                skipped.append(f"{tag}: {minutes}min drive implausible — suppressed (away?)")
+                _hold(
+                    skipped,
+                    held,
+                    meeting,
+                    leg,
+                    kind,
+                    f"{tag}: {minutes}min drive implausible — suppressed (away?)",
+                )
                 continue
 
             # Bridge leg: the drive must fit the gap between two consecutive
@@ -208,27 +274,31 @@ def meeting_desired_blocks(
             # inside a 45-min gap" case, #85) — suppress rather than create it.
             gap = getattr(leg, "gap_seconds", None)
             if isinstance(gap, int) and drive.total_seconds() > gap:
-                skipped.append(
+                _hold(
+                    skipped,
+                    held,
+                    meeting,
+                    leg,
+                    kind,
                     f"{tag}: {int(drive.total_seconds() // 60)}min drive exceeds the "
-                    f"{gap // 60}min gap — suppressed"
+                    f"{gap // 60}min gap — suppressed",
                 )
-                continue
-
-            kind = _DIRECTION_KIND.get(leg.direction)
-            if kind is None:
-                skipped.append(f"{tag}: unknown direction")
                 continue
 
             if leg.direction == "return":
                 depart_after: datetime | None = leg.depart_after
                 if depart_after is None:
-                    skipped.append(f"{tag}: return leg missing depart_after")
+                    _hold(
+                        skipped, held, meeting, leg, kind, f"{tag}: return leg missing depart_after"
+                    )
                     continue
                 start, end, anchor = depart_after, depart_after + drive, depart_after
             else:
                 arrive_by: datetime | None = leg.arrive_by
                 if arrive_by is None:
-                    skipped.append(f"{tag}: arrival leg missing arrive_by")
+                    _hold(
+                        skipped, held, meeting, leg, kind, f"{tag}: arrival leg missing arrive_by"
+                    )
                     continue
                 start, end, anchor = arrive_by - drive, arrive_by, arrive_by
 
@@ -249,4 +319,4 @@ def meeting_desired_blocks(
                 )
             )
 
-    return blocks, skipped
+    return blocks, skipped, held

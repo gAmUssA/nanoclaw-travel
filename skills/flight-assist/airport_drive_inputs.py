@@ -36,6 +36,7 @@ stdlib-only (`datetime`) per `jbaruch/coding-policy: dependency-management`.
 
 from __future__ import annotations
 
+import math
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -95,6 +96,8 @@ class AirportContext:
     timezone: str | None = None
     code: str | None = None
     name: str | None = None
+    lat: float | None = None  # coordinates: the drive engine's routing point (#334)
+    lon: float | None = None
 
 
 def _as_str(value: object) -> str | None:
@@ -112,6 +115,15 @@ def _as_str(value: object) -> str | None:
 
 def _as_int(value: object) -> int | None:
     return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
+def _as_coordinate(value: object, limit: float) -> float | None:
+    """A finite number within ±`limit` as a float, else None."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    if not -limit <= value <= limit or not math.isfinite(value):
+        return None
+    return float(value)
 
 
 def airport_context(payload: object) -> AirportContext:
@@ -132,6 +144,8 @@ def airport_context(payload: object) -> AirportContext:
         timezone=_as_str(payload.get("timezone")),
         code=_as_str(payload.get("code")),
         name=_as_str(payload.get("name")),
+        lat=_as_coordinate(payload.get("lat"), 90.0),
+        lon=_as_coordinate(payload.get("lon"), 180.0),
     )
 
 

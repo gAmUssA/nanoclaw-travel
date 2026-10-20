@@ -1,4 +1,4 @@
-"""Cross-sweep cache of STATIC airport facts — IATA code, country flag, IANA tz.
+"""Cross-sweep cache of STATIC airport facts — IATA code, country flag, IANA tz, coordinates.
 
 Those three are immutable per airport, but the sweep re-fetched them from byAir
 every ~30-min cycle: 13 airports × ~0.6s = ~7.6s re-paid each run, the dominant
@@ -20,7 +20,12 @@ correctness, so the safe move is to swallow-and-refetch, not fail closed.
 
 State file (see `state-schema.md`):
     <state_dir>/airport-facts.json
-    {"schema_version": 1, "airports": {"<airport_id>": {"iata","flag","tz"}}}
+    {"schema_version": 2, "airports": {"<airport_id>": {"iata","flag","tz","lat","lon"}}}
+
+Version 2 adds the coordinates the drive engine routes an airport by (#334).
+This module owns the file: a version-1 file is read as version 2 with no
+coordinates and rewritten as version 2 on that read; the sweep then refetches
+each airport without coordinates once.
 
 stdlib-only per `coding-policy: dependency-management` (Stdlib First).
 
@@ -35,6 +40,7 @@ Public API:
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import tempfile
@@ -46,7 +52,9 @@ from pathlib import Path
 # same `DRIVE_PLANNER_STATE_DIR` override tests point at a tmp_path).
 from skip_state import state_dir
 
-AIRPORT_FACTS_SCHEMA_VERSION = 1
+AIRPORT_FACTS_SCHEMA_VERSION = 2
+# Older versions this owner reads and upgrades on its next write.
+_MIGRATABLE_VERSIONS = frozenset({1})
 
 _FACTS_FILE = "airport-facts.json"
 
@@ -60,6 +68,12 @@ class StaticAirport:
     iata: str
     flag: str | None = None
     timezone: str | None = None
+    lat: float | None = None
+    lon: float | None = None
+
+    @property
+    def has_coordinates(self) -> bool:
+        return self.lat is not None and self.lon is not None
 
 
 def _facts_path() -> Path:
@@ -103,7 +117,9 @@ def load_static_facts() -> dict[int, StaticAirport]:
         )
         return {}
     version = payload.get("schema_version")
-    if version != AIRPORT_FACTS_SCHEMA_VERSION:
+    if not isinstance(version, int) or isinstance(version, bool):
+        version = None  # malformed: no usable version, refetch below
+    if version != AIRPORT_FACTS_SCHEMA_VERSION and version not in _MIGRATABLE_VERSIONS:
         # A future version is not an error for a pure hint cache — treat it as
         # "no usable prior state" and refetch (safe, non-disruptive: costs one
         # slow sweep, never a wrong block). A newer writer's file survives
@@ -145,8 +161,35 @@ def load_static_facts() -> dict[int, StaticAirport]:
             iata=iata,
             flag=_clean_str(entry.get("flag")),
             timezone=_clean_str(entry.get("tz")),
+            lat=_coordinate(entry.get("lat"), 90.0),
+            lon=_coordinate(entry.get("lon"), 180.0),
         )
+    if version in _MIGRATABLE_VERSIONS:
+        _upgrade(facts, version)
     return facts
+
+
+def _upgrade(facts: dict[int, StaticAirport], version: object) -> None:
+    """Rewrite an older file at AIRPORT_FACTS_SCHEMA_VERSION, the owner's
+    migration on read. A failed write leaves the older file for the next read
+    and says so on stderr; the facts read from it are still returned."""
+    try:
+        store_static_facts(facts)
+    except OSError as exc:
+        print(
+            f"[drive-engine] airport-facts cache v{version} could not be rewritten as "
+            f"v{AIRPORT_FACTS_SCHEMA_VERSION} ({exc}); it is read as is and migrated next time",
+            file=sys.stderr,
+        )
+
+
+def _coordinate(value: object, limit: float) -> float | None:
+    """A cached coordinate within ±`limit`, else None (the sweep refetches)."""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    if not -limit <= value <= limit or not math.isfinite(value):
+        return None
+    return float(value)
 
 
 def store_static_facts(facts: dict[int, StaticAirport]) -> None:
@@ -165,6 +208,8 @@ def store_static_facts(facts: dict[int, StaticAirport]) -> None:
                 "iata": fact.iata,
                 "flag": fact.flag,
                 "tz": fact.timezone,
+                "lat": fact.lat,
+                "lon": fact.lon,
             }
             for airport_id, fact in sorted(facts.items())
         },

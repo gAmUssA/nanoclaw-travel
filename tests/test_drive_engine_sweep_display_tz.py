@@ -92,7 +92,7 @@ def _stub_live_clients(monkeypatch, reader, state_dir: Path) -> dict:
 
     def capture_meeting_blocks(meetings, *, route, driving_to, display_tz=None):
         captured["display_tz"] = display_tz
-        return [], []
+        return [], [], []
 
     def capture_fetch_window(self, *, time_min, time_max):
         captured["window_start"] = time_min
@@ -104,7 +104,7 @@ def _stub_live_clients(monkeypatch, reader, state_dir: Path) -> dict:
     monkeypatch.setattr(
         reconcile_sweep,
         "build_plan",
-        lambda **_kwargs: SimpleNamespace(plan=ReconcilePlan(), skipped=()),
+        lambda **_kwargs: SimpleNamespace(plan=ReconcilePlan(), skipped=(), held=()),
     )
     monkeypatch.setattr(
         reconcile_sweep, "finish_sweep", lambda *_args, **_kwargs: {"wake_agent": False}
