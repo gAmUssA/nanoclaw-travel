@@ -108,6 +108,103 @@ def test_constructor_rejects_empty_key():
         MapsClient("")
 
 
+def _routes_response(**overrides):
+    route = {"staticDuration": "1800s", "duration": "2400.5s", "distanceMeters": 60000}
+    route.update(overrides)
+    return _FakeResponse(json.dumps({"routes": [route]}).encode())
+
+
+def test_routes_traffic_request_and_response():
+    client = MapsClient(SYNTH_KEY, backend="routes", timeout=5.0)
+    with patch("urllib.request.urlopen", return_value=_routes_response()) as send:
+        result = client.travel_time("home address", "SFO airport")
+    request = send.call_args.args[0]
+    assert request.full_url == "https://routes.googleapis.com/directions/v2:computeRoutes"
+    assert request.method == "POST"
+    assert request.get_header("X-goog-api-key") == SYNTH_KEY
+    assert request.get_header("X-goog-fieldmask") == (
+        "routes.duration,routes.staticDuration,routes.distanceMeters"
+    )
+    assert json.loads(request.data) == {
+        "origin": {"address": "home address"},
+        "destination": {"address": "SFO airport"},
+        "travelMode": "DRIVE",
+        "routingPreference": "TRAFFIC_AWARE",
+    }
+    assert send.call_args.kwargs["timeout"] == 5.0
+    assert result.duration_seconds == 1800
+    assert result.in_traffic_seconds == 2401
+    assert result.distance_meters == 60000
+    assert result.traffic_factor == pytest.approx(2401 / 1800)
+    assert result.source == "google"
+
+
+def test_routes_gps_origin_and_place_id_destination():
+    client = MapsClient(SYNTH_KEY, backend="routes")
+    with patch("urllib.request.urlopen", return_value=_routes_response()) as send:
+        client.travel_time("40.7580,-73.9855", "place_id:synthetic-airport-id")
+    body = json.loads(send.call_args.args[0].data)
+    assert body["origin"] == {"location": {"latLng": {"latitude": 40.758, "longitude": -73.9855}}}
+    assert body["destination"] == {"placeId": "synthetic-airport-id"}
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"duration": None},
+        {"staticDuration": None},
+        {"duration": "NaNs"},
+        {"duration": "-2s"},
+        {"duration": "bad"},
+        {"duration": "9" * 400 + "s"},
+        {"distanceMeters": None},
+        {"distanceMeters": -1},
+    ],
+)
+def test_routes_rejects_missing_or_invalid_travel_data(overrides):
+    client = MapsClient(SYNTH_KEY, backend="routes")
+    with patch("urllib.request.urlopen", return_value=_routes_response(**overrides)):
+        with pytest.raises(MapsError, match="MALFORMED_RESPONSE"):
+            client.travel_time("home", "airport")
+
+
+def test_routes_empty_response_is_no_route():
+    with patch("urllib.request.urlopen", return_value=_FakeResponse(b'{"routes": []}')):
+        with pytest.raises(MapsError, match="ZERO_RESULTS"):
+            MapsClient(SYNTH_KEY, backend="routes").travel_time("home", "airport")
+
+
+def test_routes_failure_uses_existing_tomtom_backup():
+    from unittest.mock import Mock
+
+    backup = Mock(spec=TomTomClient)
+    expected = TravelTime(1800, 2400, 2400 / 1800, 60000, "home", "airport", "tomtom")
+    backup.travel_time.return_value = expected
+    client = MapsClient(SYNTH_KEY, backend="routes", tomtom=backup)
+    with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("test outage")):
+        assert client.travel_time("home", "airport") == expected
+    backup.travel_time.assert_called_once_with("home", "airport")
+
+
+def test_from_env_selects_routes_from_public_config(monkeypatch, tmp_path):
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "onecli-managed")
+    config = tmp_path / "google-maps.json"
+    config.write_text('{"backend":"routes"}')
+    client = MapsClient.from_env(config_path=config)
+    with patch("urllib.request.urlopen", return_value=_routes_response()) as send:
+        client.travel_time("home", "airport")
+    assert send.call_args.args[0].get_header("X-goog-api-key") == "onecli-managed"
+
+
+@pytest.mark.parametrize("config_text", ['{"backend":"typo"}', "[]", "invalid-json"])
+def test_from_env_rejects_invalid_backend_configuration(monkeypatch, tmp_path, config_text):
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "onecli-managed")
+    config = tmp_path / "google-maps.json"
+    config.write_text(config_text)
+    with pytest.raises(ValueError):
+        MapsClient.from_env(config_path=config)
+
+
 def test_travel_time_rejects_empty_origin(client):
     with pytest.raises(ValueError, match="origin and destination"):
         client.travel_time(origin="", destination="SFO")

@@ -29,7 +29,9 @@ The script reads `BYAIR_MCP_URL` and `GOOGLE_MAPS_API_KEY`, prints single-line J
 Parse the JSON. All `true`: emit `flight-assist credentials present`. Any `false`: emit one line per missing variable:
 
 - `BYAIR_MCP_URL missing. Add personal MCP link from https://byairapp.com/mcp/ to OneCLI vault and restart container.`
-- `GOOGLE_MAPS_API_KEY missing. Create a Distance Matrix API key at https://console.cloud.google.com/apis/credentials and add to OneCLI vault.`
+- `GOOGLE_MAPS_API_KEY missing. Add a Google Maps key to OneCLI and enable the routing API selected in /workspace/global/google-maps.json (Routes API for new projects).`
+Maps backend selection is read from `/workspace/global/google-maps.json`: `{"backend":"routes"}` uses traffic-aware Routes API; absent configuration preserves legacy Distance Matrix. Routes credentials are injected by OneCLI as `X-Goog-Api-Key` on `routes.googleapis.com/directions/v2:computeRoutes`. An env-presence flag can be a placeholder and does not prove provider access; verify an actual `MapsClient.from_env().travel_time(...)` call when diagnosing routing.
+
 Calendar access has no flag: OneCLI's gateway injects the Google OAuth Bearer on the wire, so no credential lives in this container and no env var gates it (nanoclaw#638). If the user is diagnosing calendar writes specifically, tell them to run the reconcile (Step 3) and read its `error` — `gateway` means the gateway is not authenticating the requests, `tier` means this agent's tier is gated from Google by design.
 
 Finish here.
@@ -64,7 +66,7 @@ Then compose the notification. Each event is `{"flight_id": int, "event": {"reas
 
 The full event-shape contract is in `references/event-payloads.md`; consult it when an event's `reason` is unfamiliar.
 
-Phrase relative-date words ("today" / "tomorrow") against the operator's local date per `rules/operator-local-tz-phrasing.md` (run the core `current-tz` script, `/home/node/.claude/skills/tessl__current-tz/scripts/read-current-tz.py`). Displayed airport clock times stay as-is.
+Phrase relative-date words ("today" / "tomorrow") against the operator's local date per `rules/operator-local-tz-phrasing.md` (run `/home/node/.claude/skills/tessl__flight-assist/scripts/read-current-tz.py`). Displayed airport clock times stay as-is.
 
 The reason → notification mapping for the documented events:
 

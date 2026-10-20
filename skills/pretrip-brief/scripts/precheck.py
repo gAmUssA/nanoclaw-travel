@@ -17,6 +17,14 @@ SKILLS = Path("/home/node/.claude/skills")
 FLIGHTY = Path(os.environ.get("FLIGHTY_SNAPSHOT_DIR", "/workspace/extra/flighty"))
 
 
+def seatwifi_url(code):
+    """Public lookup only; no request, date-specific claim, or airline inference."""
+    normalized = re.sub(r"\s+", "", str(code or "")).upper()
+    if not re.fullmatch(r"(?=[A-Z0-9]{2}\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{2}[1-9]\d{0,3}", normalized):
+        return None
+    return "https://seatwifi.com/flights/" + normalized.lower()
+
+
 def instant(value):
     if not value:
         return None
@@ -249,6 +257,8 @@ def collect_flights(now):
             flights[flight_identity(flight)] = flight
     except (OSError, ValueError, KeyError, TypeError):
         errors.append("TripIt itinerary cache unavailable")
+    for flight in flights.values():
+        flight["wifi_lookup_url"] = seatwifi_url(flight.get("code"))
     return list(flights.values()), list(dict.fromkeys(errors))
 
 
