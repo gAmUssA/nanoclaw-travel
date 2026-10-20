@@ -279,6 +279,7 @@ def plan_reconcile(
     *,
     managed_legacy: frozenset[str] = _DEFAULT_MANAGED_LEGACY,
     held: frozenset[tuple[str, str]] = frozenset(),
+    now: datetime | None = None,
 ) -> ReconcilePlan:
     """Diff desired legs against current calendar blocks (#156 G1 / G7 / R4).
 
@@ -286,9 +287,12 @@ def plan_reconcile(
     converge or orphan-delete; blocks of any other legacy generation are left
     entirely untouched — never orphaned. `held` are the `(identity, kind)` keys
     of legs that exist but could not be computed this sweep (`HeldLeg`): their
-    current unified blocks are neither updated nor deleted. Pure and
-    deterministic: output action lists are ordered by the desired-leg order then
-    the current-block order, with no clock or ambient state.
+    current unified blocks are neither updated nor deleted. With `now`, a
+    unified block whose anchor has already passed is history and is never
+    orphan-deleted: a meeting that ended drops out of the calendar fetch, and
+    its drive stays where it happened. Pure and deterministic: output action
+    lists are ordered by the desired-leg order then the current-block order, and
+    the only clock is the `now` passed in.
     """
     creates: list[Create] = []
     updates: list[Update] = []
@@ -339,6 +343,8 @@ def plan_reconcile(
     for (identity, kind), blocks in unified_by_key.items():
         if (identity, kind) not in desired_keys and (identity, kind) not in held:
             for block in blocks:
+                if now is not None and block.anchor is not None and block.anchor < now:
+                    continue  # history, not an orphan
                 deletes.append(Delete(block.event_id, "orphan: no desired leg"))
 
     # Legacy orphans: any legacy block not consumed by a convert.

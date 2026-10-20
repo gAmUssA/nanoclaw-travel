@@ -986,3 +986,37 @@ def test_overlapping_trips_keep_their_own_first_and_last_flags():
     # `far` won one, so it is both.
     assert (presence["far-only"].is_first, presence["far-only"].is_last) == (True, True)
     assert presence["far-only"].lodging == "Far Hotel"
+
+
+def test_a_held_trip_keeps_the_local_drive_its_outbound_absorbed(tmp_path, monkeypatch):
+    """#336 review: a sweep that absorbed hotel→venue into home→venue, then
+    cannot route home→hotel, must not recreate hotel→venue beside the held
+    outbound."""
+    monkeypatch.setenv("DRIVE_PLANNER_STATE_DIR", str(tmp_path))
+    hotel = "611 Historic Nature Trail Gatlinburg TN 37738 US"
+    home = "12 Example St, Sampleton, TN 37000"
+    local = DesiredBlock(
+        identity="mtg-1",
+        kind="meeting_outbound",
+        summary="Drive: Opening Ceremony",
+        start=datetime(2020, 8, 14, 23, 0, tzinfo=UTC),
+        end=datetime(2020, 8, 15, 0, 0, tzinfo=UTC),
+        origin=hotel,
+        destination="Stadium",
+        baseline_seconds=3600,
+        anchor=datetime(2020, 8, 15, 0, 0, tzinfo=UTC),
+    )
+
+    def route(origin, destination):
+        return None if origin == home else timedelta(minutes=20)
+
+    _blocks, _skipped, _questions, kept, held = reconcile_sweep._plan_lodging_legs(
+        schedule=_drive_trip_schedule(),
+        home=home,
+        route=route,
+        now=datetime(2020, 8, 7, 12, 0, tzinfo=UTC),
+        meeting_blocks=[local],
+        verdicts={},
+    )
+    assert kept == []
+    assert ("mtg-1", "meeting_outbound") in {leg.key for leg in held}

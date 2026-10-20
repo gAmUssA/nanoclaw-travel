@@ -455,3 +455,56 @@ def test_a_live_sweep_announces_a_drive_missing_for_an_hour(state_dir, monkeypat
     ]
     assert messages[0] is None
     assert messages[1] is not None and messages[1].startswith("Couldn't plan Drive: → BNA")
+
+
+def test_a_meeting_under_way_keeps_its_drives():
+    """#336 review: a meeting that started is bucketed `past` with no legs; its
+    return drive may still be ahead, so both its blocks are held."""
+    start = NOW - timedelta(minutes=30)
+    under_way = MeetingClass(
+        meeting_id="m2",
+        summary="Workshop",
+        bucket="past",
+        reason="meeting already started",
+        location="1 Main St",
+        start=start,
+        end=start + timedelta(hours=2),
+        legs=(),
+    )
+    _blocks, _skipped, held = meeting_desired_blocks([under_way], route=lambda o, d: None)
+    assert {leg.key for leg in held} == {("m2", "meeting_outbound"), ("m2", "meeting_return")}
+
+
+def test_a_declined_meeting_holds_nothing():
+    declined = MeetingClass(
+        meeting_id="m3",
+        summary="Lunch",
+        bucket="filtered",
+        reason="operator declined the meeting",
+        location="1 Main St",
+        start=NOW,
+        end=NOW + timedelta(hours=1),
+        legs=(),
+    )
+    assert meeting_desired_blocks([declined], route=lambda o, d: None)[2] == []
+
+
+def test_a_past_block_is_history_not_an_orphan():
+    past = _block("old", "meeting_return", "past-evt")
+    past = ParsedBlock(**{**past.__dict__, "anchor": NOW - timedelta(days=1)})
+    future = _block("gone", "meeting_return", "future-evt")
+    plan = plan_reconcile([], [past, future], now=NOW)
+    assert [d.event_id for d in plan.deletes] == ["future-evt"]
+
+
+@pytest.mark.parametrize("version", [[], {}, "2", True])
+def test_a_malformed_cache_version_reads_as_no_cache(tmp_path, monkeypatch, version, capsys):
+    import airport_facts_cache
+
+    monkeypatch.setenv("DRIVE_PLANNER_STATE_DIR", str(tmp_path))
+    (tmp_path / "airport-facts.json").write_text(
+        json.dumps({"schema_version": version, "airports": {"3": {"iata": "JFK"}}}),
+        encoding="utf-8",
+    )
+    assert airport_facts_cache.load_static_facts() == {}
+    assert "refetching" in capsys.readouterr().err

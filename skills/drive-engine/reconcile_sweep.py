@@ -926,7 +926,13 @@ def _plan_lodging_legs(
             questions.append(plan.ask)
         absorbed.update(plan.subsumed)
 
-    kept = [block for block in meeting_blocks if (block.identity, block.kind) not in absorbed]
+    deferred = {leg.key for leg in held}
+    kept = [
+        block
+        for block in meeting_blocks
+        if (block.identity, block.kind) not in absorbed
+        and (block.identity, block.kind) not in deferred
+    ]
     for identity, kind in sorted(absorbed):
         skipped.append(f"meeting {identity} {kind}: absorbed into the trip's own drive")
     return blocks, skipped, questions, kept, held

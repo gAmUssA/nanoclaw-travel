@@ -117,6 +117,8 @@ def load_static_facts() -> dict[int, StaticAirport]:
         )
         return {}
     version = payload.get("schema_version")
+    if not isinstance(version, int) or isinstance(version, bool):
+        version = None  # malformed: no usable version, refetch below
     if version != AIRPORT_FACTS_SCHEMA_VERSION and version not in _MIGRATABLE_VERSIONS:
         # A future version is not an error for a pure hint cache — treat it as
         # "no usable prior state" and refetch (safe, non-disruptive: costs one

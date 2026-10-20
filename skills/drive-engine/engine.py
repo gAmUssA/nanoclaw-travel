@@ -481,9 +481,9 @@ def build_reconcile_plan(
 
     held_keys = frozenset(leg.key for leg in held)
     if managed_legacy is None:
-        plan = plan_reconcile(desired, current_blocks, held=held_keys)
+        plan = plan_reconcile(desired, current_blocks, held=held_keys, now=now)
     else:
         plan = plan_reconcile(
-            desired, current_blocks, managed_legacy=managed_legacy, held=held_keys
+            desired, current_blocks, managed_legacy=managed_legacy, held=held_keys, now=now
         )
     return EngineResult(plan=plan, skipped=tuple(skipped), held=tuple(held))

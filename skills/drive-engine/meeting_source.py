@@ -133,6 +133,20 @@ def _trip_endpoints(leg, presence: TripPresence | None) -> tuple[str, str]:
     return origin, destination
 
 
+# Scan buckets whose meeting still exists but whose legs cannot be planned now:
+# one already under way (its return drive may still be ahead), and one whose
+# time did not parse. Their blocks are kept, never orphan-deleted (#334). A
+# declined, cancelled, skipped or virtual meeting is deliberately driveless.
+_UNKNOWABLE_REASONS = frozenset({"missing or unparseable time"})
+
+
+def _legs_unknowable(meeting) -> bool:
+    bucket = getattr(meeting, "bucket", None)
+    return bucket == "past" or (
+        bucket == "filtered" and getattr(meeting, "reason", None) in _UNKNOWABLE_REASONS
+    )
+
+
 def _hold(skipped: list[str], held: list[HeldLeg], meeting, leg, kind: str, reason: str) -> None:
     """Record a meeting leg that exists but could not be computed (#334)."""
     skipped.append(reason)
@@ -201,6 +215,18 @@ def meeting_desired_blocks(
     held: list[HeldLeg] = []
 
     for meeting in meetings:
+        if _legs_unknowable(meeting):
+            for kind in ("meeting_outbound", "meeting_return"):
+                held.append(
+                    HeldLeg(
+                        identity=meeting.meeting_id,
+                        kind=kind,
+                        summary=f"Drive: {meeting.summary}",
+                        when=meeting.start,
+                        reason=f"meeting {meeting.meeting_id}: {meeting.reason}",
+                    )
+                )
+            continue
         for leg in meeting.legs:
             tag = f"meeting {meeting.meeting_id} {leg.direction}"
             kind = _DIRECTION_KIND.get(leg.direction)

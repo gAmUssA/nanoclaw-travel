@@ -664,11 +664,28 @@ def lodging_desired_blocks(
 
     def hold_trip(trip: DriveTrip, reason: str) -> None:
         """Hold both legs of a trip that could not be planned at all, unless the
-        operator said it is flown: a flown trip has no drive to keep."""
+        operator said it is flown: a flown trip has no drive to keep.
+
+        The trip's first and last local drives are held with them: an earlier
+        sweep may have absorbed them into the outer legs, and recreating them now
+        would put a second drive on the calendar for one journey. The caller
+        drops a held local leg from the desired set."""
         recorded = verdicts.get(trip.key)
         if recorded is not None and recorded.is_operator_answer and recorded.verdict == VERDICT_FLY:
             skipped.append(f"{reason} — flying, nothing held")
             return
+        ctx = contexts.get(trip.key)
+        for local in (ctx.first_out, ctx.last_back) if ctx is not None else ():
+            if local is not None:
+                held.append(
+                    HeldLeg(
+                        identity=local.identity,
+                        kind=local.kind,
+                        summary=f"Drive: {local.label}",
+                        when=local.start,
+                        reason=f"{reason} — its outer legs may absorb this drive",
+                    )
+                )
         skipped.append(reason)
         held.append(
             HeldLeg(
