@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -41,7 +41,7 @@ from reconcile_sweep import (  # noqa: E402
     make_route,
 )
 
-UTC = timezone.utc
+UTC = UTC
 HOME = "12 Example St, TN"
 NOW = datetime(2020, 7, 10, 12, 0, tzinfo=UTC)
 US = "🇺🇸"
@@ -329,17 +329,21 @@ class _FakeCtx:
     """Stand-in for `airport_context`'s AirportContext (the `_AirportCtx`
     Protocol shape)."""
 
-    def __init__(self, code, flag=None, delay_index=None, timezone=None):
+    def __init__(self, code, flag=None, delay_index=None, timezone=None, lat=None, lon=None):
         self.code = code
         self.flag = flag
         self.delay_index = delay_index
         self.timezone = timezone
+        self.lat = lat
+        self.lon = lon
 
 
 def test_resolve_warm_static_hit_no_delay_never_fetches():
     """A cached airport with no near-term departure resolves with ZERO byAir
     calls — the warm-sweep saving that unfroze the calendar (#211)."""
-    static = StaticAirport(iata="JFK", flag="🇺🇸", timezone="America/New_York")
+    static = StaticAirport(
+        iata="JFK", flag="🇺🇸", timezone="America/New_York", lat=40.64, lon=-73.78
+    )
     calls = []
 
     def fetch():
@@ -348,8 +352,27 @@ def test_resolve_warm_static_hit_no_delay_never_fetches():
 
     resolved, new_static = _resolve_one_airport(static=static, want_delay=False, fetch=fetch)
     assert calls == []  # never fetched
-    assert resolved == ResolvedAirport(iata="JFK", flag="🇺🇸", timezone="America/New_York")
+    assert resolved == ResolvedAirport(
+        iata="JFK", flag="🇺🇸", timezone="America/New_York", lat=40.64, lon=-73.78
+    )
     assert new_static is None  # nothing new to persist
+
+
+def test_resolve_a_cached_airport_without_coordinates_refetches_them():
+    """A version-1 cache entry has no coordinates; one fetch fills them (#334)."""
+    static = StaticAirport(iata="JFK", flag="🇺🇸", timezone="America/New_York")
+    fetched = _FakeCtx("JFK", flag="🇺🇸", timezone="America/New_York", lat=40.64, lon=-73.78)
+    resolved, new_static = _resolve_one_airport(
+        static=static, want_delay=False, fetch=lambda: fetched
+    )
+    assert (resolved.lat, resolved.lon) == (40.64, -73.78)
+    assert new_static is not None and new_static.has_coordinates
+
+
+def test_resolve_a_coordinate_refetch_that_fails_keeps_the_cached_facts():
+    static = StaticAirport(iata="JFK", flag="🇺🇸", timezone="America/New_York")
+    resolved, new_static = _resolve_one_airport(static=static, want_delay=False, fetch=lambda: None)
+    assert (resolved.iata, resolved.lat, new_static) == ("JFK", None, None)
 
 
 def test_resolve_miss_fetches_and_returns_static_to_persist():
@@ -459,11 +482,17 @@ def test_resolver_warm_hit_makes_no_fetch_and_stays_clean():
     fetches and leaves the dirty flag unset (nothing new to persist)."""
     fetch, calls = _counting_fetch({})
     resolve, dirty = _make_airport_resolver(
-        static_facts={7: StaticAirport(iata="BNA", flag="🇺🇸", timezone="America/Chicago")},
+        static_facts={
+            7: StaticAirport(
+                iata="BNA", flag="🇺🇸", timezone="America/Chicago", lat=36.12, lon=-86.68
+            )
+        },
         near_term_dep_ids=set(),
         fetch_ctx=fetch,
     )
-    assert resolve(7) == ResolvedAirport(iata="BNA", flag="🇺🇸", timezone="America/Chicago")
+    assert resolve(7) == ResolvedAirport(
+        iata="BNA", flag="🇺🇸", timezone="America/Chicago", lat=36.12, lon=-86.68
+    )
     assert calls == []
     assert dirty() is False
 
@@ -780,34 +809,34 @@ def test_plan_lodging_legs_drops_the_local_drive_the_outbound_absorbed(tmp_path,
         identity="mtg-1",
         kind="meeting_outbound",
         summary="Drive: Opening Ceremony",
-        start=datetime(2020, 8, 14, 23, 0, tzinfo=timezone.utc),
-        end=datetime(2020, 8, 15, 0, 0, tzinfo=timezone.utc),
+        start=datetime(2020, 8, 14, 23, 0, tzinfo=UTC),
+        end=datetime(2020, 8, 15, 0, 0, tzinfo=UTC),
         origin=hotel,
         destination=stadium,
         baseline_seconds=3600,
-        anchor=datetime(2020, 8, 15, 0, 0, tzinfo=timezone.utc),
+        anchor=datetime(2020, 8, 15, 0, 0, tzinfo=UTC),
         timezone="America/New_York",
     )
     unrelated = DesiredBlock(
         identity="mtg-2",
         kind="meeting_outbound",
         summary="Drive: Dentist",
-        start=datetime(2020, 8, 3, 14, 0, tzinfo=timezone.utc),
-        end=datetime(2020, 8, 3, 14, 30, tzinfo=timezone.utc),
+        start=datetime(2020, 8, 3, 14, 0, tzinfo=UTC),
+        end=datetime(2020, 8, 3, 14, 30, tzinfo=UTC),
         origin=home,
         destination="Dentist",
         baseline_seconds=1800,
-        anchor=datetime(2020, 8, 3, 14, 30, tzinfo=timezone.utc),
+        anchor=datetime(2020, 8, 3, 14, 30, tzinfo=UTC),
     )
 
     def route(origin, destination):
         return timedelta(hours=2)
 
-    blocks, skipped, questions, kept = reconcile_sweep._plan_lodging_legs(
+    blocks, skipped, questions, kept, _held = reconcile_sweep._plan_lodging_legs(
         schedule=_drive_trip_schedule(),
         home=home,
         route=route,
-        now=datetime(2020, 8, 7, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2020, 8, 7, 12, 0, tzinfo=UTC),
         meeting_blocks=[local, unrelated],
     )
 
@@ -823,18 +852,18 @@ def test_plan_lodging_legs_keeps_every_meeting_block_when_no_trip_matches(tmp_pa
         identity="mtg-9",
         kind="meeting_outbound",
         summary="Drive: Dentist",
-        start=datetime(2020, 8, 3, 14, 0, tzinfo=timezone.utc),
-        end=datetime(2020, 8, 3, 14, 30, tzinfo=timezone.utc),
+        start=datetime(2020, 8, 3, 14, 0, tzinfo=UTC),
+        end=datetime(2020, 8, 3, 14, 30, tzinfo=UTC),
         origin="home",
         destination="Dentist",
         baseline_seconds=1800,
-        anchor=datetime(2020, 8, 3, 14, 30, tzinfo=timezone.utc),
+        anchor=datetime(2020, 8, 3, 14, 30, tzinfo=UTC),
     )
-    blocks, skipped, questions, kept = reconcile_sweep._plan_lodging_legs(
+    blocks, skipped, questions, kept, _held = reconcile_sweep._plan_lodging_legs(
         schedule=[],
         home="home",
         route=lambda origin, destination: timedelta(hours=1),
-        now=datetime(2020, 8, 7, 12, 0, tzinfo=timezone.utc),
+        now=datetime(2020, 8, 7, 12, 0, tzinfo=UTC),
         meeting_blocks=[block],
     )
     assert kept == [block]
@@ -854,14 +883,14 @@ def test_trip_presence_marks_the_first_and_last_event_of_each_trip():
         key = "t1"
         address = "611 Historic Nature Trail"
         check_out = None
-        span_start = datetime(2020, 8, 14, tzinfo=timezone.utc)
-        span_end = datetime(2020, 8, 16, tzinfo=timezone.utc)
+        span_start = datetime(2020, 8, 14, tzinfo=UTC)
+        span_end = datetime(2020, 8, 16, tzinfo=UTC)
 
     meetings = [
-        _M("late", datetime(2020, 8, 15, 22, tzinfo=timezone.utc)),
-        _M("early", datetime(2020, 8, 14, 20, tzinfo=timezone.utc)),
-        _M("middle", datetime(2020, 8, 15, 2, tzinfo=timezone.utc)),
-        _M("offtrip", datetime(2020, 8, 30, 12, tzinfo=timezone.utc)),
+        _M("late", datetime(2020, 8, 15, 22, tzinfo=UTC)),
+        _M("early", datetime(2020, 8, 14, 20, tzinfo=UTC)),
+        _M("middle", datetime(2020, 8, 15, 2, tzinfo=UTC)),
+        _M("offtrip", datetime(2020, 8, 30, 12, tzinfo=UTC)),
     ]
     presence = reconcile_sweep._trip_presence(
         [_T()], meetings, route=lambda o, d: timedelta(minutes=15)
@@ -885,8 +914,8 @@ class _PresenceTrip:
         self.key = key
         self.address = address
         self.check_out = None
-        self.span_start = datetime(2020, 8, start_day, tzinfo=timezone.utc)
-        self.span_end = datetime(2020, 8, end_day, tzinfo=timezone.utc)
+        self.span_start = datetime(2020, 8, start_day, tzinfo=UTC)
+        self.span_end = datetime(2020, 8, end_day, tzinfo=UTC)
 
 
 class _PresenceMeeting:
@@ -904,7 +933,7 @@ def test_overlapping_trips_give_the_meeting_to_the_nearer_lodging():
     """Both trips reach it; iteration order must not decide which claims it."""
     near = _PresenceTrip("near", "Near Hotel")
     far = _PresenceTrip("far", "Far Hotel")
-    meeting = _PresenceMeeting("m", datetime(2020, 8, 15, 18, tzinfo=timezone.utc))
+    meeting = _PresenceMeeting("m", datetime(2020, 8, 15, 18, tzinfo=UTC))
     route = _distance_route(
         {"Near Hotel": timedelta(minutes=10), "Far Hotel": timedelta(minutes=90)}
     )
@@ -920,7 +949,7 @@ def test_an_exact_tie_between_overlapping_trips_claims_nothing():
     away-suppression exemption, so an unresolvable claim withholds it."""
     a = _PresenceTrip("a", "Hotel A")
     b = _PresenceTrip("b", "Hotel B")
-    meeting = _PresenceMeeting("m", datetime(2020, 8, 15, 18, tzinfo=timezone.utc))
+    meeting = _PresenceMeeting("m", datetime(2020, 8, 15, 18, tzinfo=UTC))
     route = _distance_route({"Hotel A": timedelta(minutes=20), "Hotel B": timedelta(minutes=20)})
 
     assert reconcile_sweep._trip_presence([a, b], [meeting], route=route) == {}
@@ -932,12 +961,12 @@ def test_overlapping_trips_keep_their_own_first_and_last_flags():
     over everything that fell on its dates."""
     near = _PresenceTrip("near", "Near Hotel")
     far = _PresenceTrip("far", "Far Hotel")
-    shared = _PresenceMeeting("shared", datetime(2020, 8, 15, 18, tzinfo=timezone.utc))
+    shared = _PresenceMeeting("shared", datetime(2020, 8, 15, 18, tzinfo=UTC))
     near_only = _PresenceMeeting(
-        "near-only", datetime(2020, 8, 14, 9, tzinfo=timezone.utc), location="Near Venue"
+        "near-only", datetime(2020, 8, 14, 9, tzinfo=UTC), location="Near Venue"
     )
     far_only = _PresenceMeeting(
-        "far-only", datetime(2020, 8, 16, 9, tzinfo=timezone.utc), location="Far Venue"
+        "far-only", datetime(2020, 8, 16, 9, tzinfo=UTC), location="Far Venue"
     )
 
     def route(origin, destination):
@@ -957,3 +986,49 @@ def test_overlapping_trips_keep_their_own_first_and_last_flags():
     # `far` won one, so it is both.
     assert (presence["far-only"].is_first, presence["far-only"].is_last) == (True, True)
     assert presence["far-only"].lodging == "Far Hotel"
+
+
+def test_a_held_trip_keeps_the_local_drive_its_outbound_absorbed(tmp_path, monkeypatch):
+    """#336 review: a sweep that absorbed hotel→venue into home→venue, then
+    cannot route home→hotel, must not recreate hotel→venue beside the held
+    outbound."""
+    monkeypatch.setenv("DRIVE_PLANNER_STATE_DIR", str(tmp_path))
+    hotel = "611 Historic Nature Trail Gatlinburg TN 37738 US"
+    home = "12 Example St, Sampleton, TN 37000"
+    local = DesiredBlock(
+        identity="mtg-1",
+        kind="meeting_outbound",
+        summary="Drive: Opening Ceremony",
+        start=datetime(2020, 8, 14, 23, 0, tzinfo=UTC),
+        end=datetime(2020, 8, 15, 0, 0, tzinfo=UTC),
+        origin=hotel,
+        destination="Stadium",
+        baseline_seconds=3600,
+        anchor=datetime(2020, 8, 15, 0, 0, tzinfo=UTC),
+    )
+
+    def route(origin, destination):
+        return None if origin == home else timedelta(minutes=20)
+
+    _blocks, _skipped, _questions, kept, held = reconcile_sweep._plan_lodging_legs(
+        schedule=_drive_trip_schedule(),
+        home=home,
+        route=route,
+        now=datetime(2020, 8, 7, 12, 0, tzinfo=UTC),
+        meeting_blocks=[local],
+        verdicts={},
+    )
+    assert kept == []
+    assert ("mtg-1", "meeting_outbound") in {leg.key for leg in held}
+
+
+def test_resolve_a_refresh_without_coordinates_keeps_the_cached_pair():
+    """#336 review: a near-term delay refresh missing lat/lon must not downgrade
+    a cached routing point to routing by name."""
+    static = StaticAirport(iata="BNA", flag="🇺🇸", timezone="America/Chicago", lat=36.12, lon=-86.68)
+    fetched = _FakeCtx("BNA", flag="🇺🇸", delay_index="high", timezone="America/Chicago")
+    resolved, new_static = _resolve_one_airport(
+        static=static, want_delay=True, fetch=lambda: fetched
+    )
+    assert (resolved.lat, resolved.lon, resolved.delay_index) == (36.12, -86.68, "high")
+    assert new_static is None  # nothing changed worth persisting

@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 _BUNDLE_DIR = Path(__file__).resolve().parent
@@ -96,7 +96,7 @@ def record_answer(request: dict, *, schedule=None, now: datetime | None = None) 
     if answer is None:
         raise ValueError(f"`answer` must be 'drive' or 'fly' (got {request.get('answer')!r})")
 
-    now = now or datetime.now(timezone.utc)
+    now = now or datetime.now(UTC)
     if schedule is None:
         schedule = load_travel_schedule()
 

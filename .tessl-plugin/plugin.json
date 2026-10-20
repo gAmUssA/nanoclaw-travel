@@ -1,6 +1,6 @@
 {
   "name": "jbaruch/nanoclaw-travel",
-  "version": "0.2.133",
+  "version": "0.2.153",
   "description": "Viktor\u2019s travel pack: local Flighty cached flight queries, TripIt booking checks, Reclaim integration, and ExpertFlyer seat/inventory tools. Provider-dependent automation requires configured accounts.",
   "private": false,
   "skills": [

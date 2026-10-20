@@ -1,6 +1,9 @@
 """HTTP client for the byAir MCP streamable-HTTP endpoint, called as an API.
 
-The endpoint speaks JSON-RPC 2.0 over HTTP with session-id continuity. Used
+The endpoint speaks JSON-RPC 2.0 over HTTP. Session-id continuity is used
+when the server issues an `Mcp-Session-Id` on `initialize`; a server that
+issues none runs stateless (MCP 2025-06-18 Session Management: the server MAY
+assign a session id), and the client then sends no session header. Used
 by the precheck script for polling-time queries; not registered as a Claude
 MCP tool inside the agent container (the agent never sees the raw 13KB
 responses; the precheck filters to the ~1KB operational slice before any
@@ -35,6 +38,12 @@ import urllib.request
 from typing import Any
 
 _PROTOCOL_VERSION = "2025-06-18"
+# Appended to every malformed-reply error so the operator knows what to do.
+_MALFORMED_REMEDY = (
+    " — check that BYAIR_MCP_URL is the current personal MCP link from "
+    "https://byairapp.com/mcp/; if it is and this persists, byAir changed its "
+    "reply shape: upgrade nanoclaw-travel, or report the response"
+)
 _CLIENT_INFO = {"name": "nanoclaw-flight-assist", "version": "0.1.0"}
 
 
@@ -50,10 +59,13 @@ class ByAirError(Exception):
 class ByAirClient:
     """Thin JSON-RPC client for the byAir MCP endpoint.
 
-    Sessions are initialized lazily on the first request and reused for
-    subsequent calls. On session-invalid responses (HTTP 400 / 404 with
-    the session-id header rejected), the client transparently re-initializes
-    once and retries the call; a second failure propagates.
+    The handshake runs lazily on the first request and is reused for
+    subsequent calls. When the server issues a session id, it rides on every
+    later request; on session-invalid responses (HTTP 400 / 404 with the
+    session-id header rejected), the client transparently re-initializes once
+    and retries the call; a second failure propagates. When the server issues
+    none, the client runs stateless: one handshake, no session header, and no
+    session-expiry retry (a 400 / 404 then propagates as a plain HTTPError).
 
     Not thread-safe — one client per process is the intended shape.
     """
@@ -67,6 +79,10 @@ class ByAirClient:
         self._url = url
         self._timeout = timeout
         self._session_id: str | None = None
+        # Handshake state is tracked separately from the session id: a
+        # stateless server issues no id, and keying "initialized" on the id
+        # would re-run the handshake before every call (#326).
+        self._initialized = False
         self._next_id = 0
         # Per-airport caches for the lifetime of this client. byAir throttles
         # ~10 calls/session and a single precheck cycle queries the same
@@ -144,7 +160,7 @@ class ByAirClient:
         but some (e.g. byair_get_airport_tips) return a JSON array (list).
         The decoded `json.loads` value is whatever the tool emitted.
         """
-        if self._session_id is None:
+        if not self._initialized:
             self._initialize()
         try:
             return self._tools_call(name, arguments)
@@ -154,6 +170,7 @@ class ByAirClient:
             # HTTPError from the SECOND attempt, so diagnostics reflect the
             # final transport failure rather than a stale prior error.
             self._session_id = None
+            self._initialized = False
             self._initialize()
             try:
                 return self._tools_call(name, arguments)
@@ -168,7 +185,10 @@ class ByAirClient:
                 raise cause from None
 
     def _initialize(self) -> None:
-        """Run the MCP initialize handshake; capture the session-id header."""
+        """Run the MCP initialize handshake; capture the session-id header if issued.
+
+        A missing `Mcp-Session-Id` is stateless mode, not an error (#326).
+        """
         payload = self._rpc_envelope(
             "initialize",
             {
@@ -183,44 +203,84 @@ class ByAirClient:
             "MCP-Protocol-Version": _PROTOCOL_VERSION,
         }
         response, response_headers = self._http_post(headers, payload)
-        session_id = response_headers.get("mcp-session-id")
-        if not session_id:
+        # Accept the handshake only on a real InitializeResult, session id or
+        # not: a JSON-RPC error or a malformed HTTP-200 body must not be
+        # mistaken for stateless mode (#326).
+        if isinstance(response, dict) and "error" in response:
             raise ByAirError(
-                "session_missing",
-                "initialize response did not include mcp-session-id header",
+                "handshake_failed",
+                f"initialize returned a JSON-RPC error: {response['error']!r} — check that "
+                "BYAIR_MCP_URL is the current personal MCP link from https://byairapp.com/mcp/",
             )
-        self._session_id = session_id
-        _ = response  # body parsed but not retained — server caps are not needed for the API path
+        result = response.get("result") if isinstance(response, dict) else None
+        if not isinstance(result, dict) or not isinstance(result.get("protocolVersion"), str):
+            raise ByAirError(
+                "malformed_response",
+                "initialize response is not an InitializeResult (no result.protocolVersion)"
+                + _MALFORMED_REMEDY,
+            )
+        self._session_id = response_headers.get("mcp-session-id") or None
 
         # Notify the server we're initialized (no response expected)
         notify_payload = self._rpc_envelope("notifications/initialized", None, notification=True)
-        notify_headers = {**headers, "Mcp-Session-Id": self._session_id}
-        self._http_post(notify_headers, notify_payload, expect_response=False)
+        self._http_post(self._with_session(headers), notify_payload, expect_response=False)
+        self._initialized = True
+
+    def _with_session(self, headers: dict) -> dict:
+        """Return `headers` plus `Mcp-Session-Id` when the server issued one."""
+        if self._session_id is None:
+            return dict(headers)
+        return {**headers, "Mcp-Session-Id": self._session_id}
 
     def _tools_call(self, name: str, arguments: dict) -> Any:
         """Send tools/call and decode the double-encoded response."""
-        assert self._session_id is not None
         payload = self._rpc_envelope("tools/call", {"name": name, "arguments": arguments})
-        headers = {
-            "Content-Type": "application/json",
-            "Accept": "application/json, text/event-stream",
-            "MCP-Protocol-Version": _PROTOCOL_VERSION,
-            "Mcp-Session-Id": self._session_id,
-        }
+        headers = self._with_session(
+            {
+                "Content-Type": "application/json",
+                "Accept": "application/json, text/event-stream",
+                "MCP-Protocol-Version": _PROTOCOL_VERSION,
+            }
+        )
         body, _ = self._http_post(headers, payload)
-        result = body.get("result", {})
+        result = body.get("result", {}) if isinstance(body, dict) else None
+        if not isinstance(result, dict):
+            raise ByAirError(
+                "malformed_response", f"{name} response has no result object" + _MALFORMED_REMEDY
+            )
         is_error = result.get("isError", False)
         content_list = result.get("content", [])
-        if not content_list or content_list[0].get("type") != "text":
+        if (
+            not isinstance(content_list, list)
+            or not content_list
+            or not isinstance(content_list[0], dict)
+            or content_list[0].get("type") != "text"
+            or not isinstance(content_list[0].get("text"), str)
+        ):
             raise ByAirError(
                 "malformed_response",
-                f"{name} response had no text content block — got {result!r}",
+                f"{name} response had no text content block — got {result!r}" + _MALFORMED_REMEDY,
             )
         text_payload = content_list[0]["text"]
         if is_error:
-            error_type = result.get("_meta", {}).get("error_type", "unknown")
+            meta = result.get("_meta")
+            error_type = meta.get("error_type", "unknown") if isinstance(meta, dict) else "unknown"
+            # A non-string error type (null included) is a malformed reply: a
+            # None here would read as a clean pass in the sync-health counter.
+            if not isinstance(error_type, str) or not error_type:
+                raise ByAirError(
+                    "malformed_response",
+                    f"{name} error reply has no string error_type: {text_payload}"
+                    + _MALFORMED_REMEDY,
+                )
             raise ByAirError(error_type, text_payload)
-        return json.loads(text_payload)
+        try:
+            return json.loads(text_payload)
+        except json.JSONDecodeError as decode_err:
+            raise ByAirError(
+                "malformed_response",
+                f"{name} text content is not JSON: {decode_err}" + _MALFORMED_REMEDY,
+            ) from decode_err
 
     def _http_post(
         self, headers: dict, payload: bytes, *, expect_response: bool = True
@@ -258,8 +318,13 @@ class ByAirClient:
                         f"the server's streaming behaviour changed and the client needs an "
                         f"SSE-parsing path added in `_http_post`.",
                     )
-                raw = response.read().decode("utf-8")
-                return (json.loads(raw), response_headers)
+                try:
+                    return (json.loads(response.read().decode("utf-8")), response_headers)
+                except (UnicodeDecodeError, json.JSONDecodeError) as decode_err:
+                    raise ByAirError(
+                        "malformed_response",
+                        f"response body is not JSON: {decode_err}" + _MALFORMED_REMEDY,
+                    ) from decode_err
         except urllib.error.HTTPError as http_err:
             # Session expired: 400 or 404 with a prior session-id sent.
             if http_err.code in (400, 404) and self._session_id is not None:

@@ -20,7 +20,7 @@ TripIt-derived `travel-schedule.json` (written nightly by
 3. On a trip but before its first lodging event → the `Trip` segment's own
    `location` when present, else unresolved (`address=None`) — the caller
    surfaces "no drivable origin" instead of planning from home. The static
-   home is NEVER the anchor mid-trip.
+   home also anchors home-metro trips without lodging (#314).
 
 Rule 2/3 apply only from the moment the operator has actually left, though: the
 date-only `Trip` wrapper is "active" on the departure day itself, but before the
@@ -60,7 +60,7 @@ from __future__ import annotations
 import json
 import sys
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 
 # Co-located in this bundle; import by module name so consumers that put the
@@ -70,7 +70,8 @@ _BUNDLE_DIR = Path(__file__).resolve().parent
 if str(_BUNDLE_DIR) not in sys.path:
     sys.path.insert(0, str(_BUNDLE_DIR))
 
-from lodging import CHECK_IN, lodging_role  # noqa: E402
+from addresses import home_metro_names, is_home_metro  # noqa: E402
+from lodging import CHECK_IN, CHECK_OUT, hotel_name, lodging_role  # noqa: E402
 
 SCHEDULE_PATH = "/workspace/group/travel-schedule.json"
 
@@ -166,8 +167,8 @@ def parse_schedule_time(value) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _parse_day(value) -> date | None:
@@ -313,11 +314,92 @@ def _trip_begins_at(
     return min(candidates) if candidates else None
 
 
+# How far from checking out of another lodging, before or after its nominal
+# check-out, a departure still counts as the journey to the next one. TripIt's
+# nominal check-in routinely precedes the real arrival on a city-to-city
+# hotel-change day (#323); a departure after a night at the new lodging is
+# outbound from it, not inbound.
+_INBOUND_WINDOW = timedelta(hours=12)
+
+# Longest gap between one leg's arrival and the next leg's departure that still
+# continues the same journey (a train to the airport, a connecting flight).
+_CONNECTION_WINDOW = timedelta(hours=4)
+
+
+def _effective_check_in(
+    record: dict,
+    nominal: datetime,
+    schedule: list[dict],
+    trip_start: date | None,
+    trip_end: date | None,
+) -> datetime:
+    """When the operator can actually be at a checked-in lodging.
+
+    Only on a hotel change: the journey's first leg arrives after the nominal
+    check-in, departs before this lodging's check-out and within
+    _INBOUND_WINDOW of another lodging's nominal check-out, on either side.
+    Legs departing within _CONNECTION_WINDOW of the previous arrival continue
+    the journey, and the check-in takes effect at its final arrival. A first
+    lodging reached from home (#235) and a staging night before an outbound
+    departure keep their nominal check-in.
+    Lodgings and transports count only inside the active trip's span, so an
+    earlier trip's hotel is not a hotel change.
+    """
+    name = hotel_name(record.get("summary"))
+    checkout = None
+    left_lodging: list[datetime] = []
+    for other in schedule:
+        if other.get("type") != "Lodging" or lodging_role(other.get("summary")) != CHECK_OUT:
+            continue
+        other_name = hotel_name(other.get("summary"))
+        if other_name == name:
+            when = parse_schedule_time(other.get("start"))
+            if when is not None and when > nominal and (checkout is None or when < checkout):
+                checkout = when
+        elif other_name is not None:
+            when = _timed_within(other, trip_start, trip_end)
+            if when is not None:
+                left_lodging.append(when)
+    if not left_lodging:
+        return nominal
+    legs = []
+    for transport in schedule:
+        if transport.get("type") not in _DEPARTURE_TYPES:
+            continue
+        departs = _timed_within(transport, trip_start, trip_end)
+        arrives = parse_schedule_time(transport.get("end"))
+        if departs is None or arrives is None or arrives <= departs:
+            continue
+        if checkout is not None and departs >= checkout:
+            continue
+        legs.append((departs, arrives))
+    legs.sort()
+    first = next(
+        (
+            index
+            for index, (departs, arrives) in enumerate(legs)
+            if arrives > nominal
+            and any(abs(departs - left) <= _INBOUND_WINDOW for left in left_lodging)
+        ),
+        None,
+    )
+    if first is None:
+        return nominal
+    arrival = legs[first][1]
+    for departs, arrives in legs[first + 1 :]:
+        if departs > arrival + _CONNECTION_WINDOW:
+            break
+        if departs >= arrival:
+            arrival = arrives
+    return arrival if arrival > nominal else nominal
+
+
 def resolve_anchor(
     schedule: list[dict] | None,
     *,
     at: datetime,
     home_address: str | None,
+    home_metros: frozenset[str] = frozenset(),
 ) -> TripAnchor:
     """Resolve the drive anchor for time `at` per the #122 rules. Pure.
 
@@ -332,6 +414,8 @@ def resolve_anchor(
             (flight-assist's config leaves it unset), in which case the
             off-trip anchor is None with source "home" — same "no origin
             configured" contract callers already handle.
+        home_metros: normalized labels from `addresses.home_metro_names`.
+            A matching trip without lodging resolves to home (#314).
 
     Returns:
         TripAnchor — see the class docstring for the source ladder.
@@ -341,13 +425,29 @@ def resolve_anchor(
     if not schedule:
         return TripAnchor(address=home_address, source="home")
 
-    at_utc = at.astimezone(timezone.utc)
+    at_utc = at.astimezone(UTC)
     trip = _active_trip(schedule, at_utc.date())
     if trip is None:
         return TripAnchor(address=home_address, source="home")
 
     trip_start = _parse_day(trip.get("start"))
     trip_end = _parse_day(trip.get("end"))
+
+    # A local placeholder is still home unless its span contains a lodging
+    # reservation. Count future and address-less lodging too: neither proves
+    # that this is a placeholder (#314).
+    has_lodging = any(
+        record.get("type") == "Lodging"
+        and (day := _parse_day(record.get("start"))) is not None
+        and trip_start is not None
+        and trip_end is not None
+        and trip_start <= day <= trip_end
+        for record in schedule
+    )
+    if is_home_metro(trip.get("location"), home_metros) and not has_lodging:
+        return TripAnchor(
+            address=home_address, source="home", detail="home-metro trip without lodging"
+        )
 
     # Before the trip begins the operator is still home — the date-only Trip
     # wrapper is "active" on the first day, but anchoring an outbound drive at
@@ -375,6 +475,8 @@ def resolve_anchor(
         if not isinstance(location, str) or not location.strip():
             continue
         when = parse_schedule_time(record.get("start"))
+        if when is not None and lodging_role(record.get("summary")) == CHECK_IN:
+            when = _effective_check_in(record, when, schedule, trip_start, trip_end)
         if when is None or when > at_utc:
             continue
         # Bound lodging to the active trip's span so a prior trip's
@@ -477,7 +579,11 @@ def flight_summaries(schedule: list[dict] | None) -> list[str]:
 
 
 def opened_from_home(
-    schedule: list[dict] | None, *, at: datetime, home_address: str | None
+    schedule: list[dict] | None,
+    *,
+    at: datetime,
+    home_address: str | None,
+    home_metros: frozenset[str] = frozenset(),
 ) -> bool:
     """Whether the journey whose ground-reached departure sits at `at` left home.
 
@@ -510,12 +616,12 @@ def opened_from_home(
     """
     if home_address is None:
         return False
-    planned = resolve_anchor(schedule, at=at, home_address=home_address)
+    planned = resolve_anchor(schedule, at=at, home_address=home_address, home_metros=home_metros)
     if planned.source == "home":
         return planned.address is not None
     if not schedule:
         return False
-    trip = _active_trip(schedule, at.astimezone(timezone.utc).date())
+    trip = _active_trip(schedule, at.astimezone(UTC).date())
     if trip is None:
         return False
     trip_start = _parse_day(trip.get("start"))
@@ -540,5 +646,7 @@ def resolve_effective_home(home_address: str | None, *, now: datetime) -> str | 
     "no home_address configured" handling then skips routing, which beats
     routing to a residence an ocean away.
     """
-    anchor = resolve_anchor(load_travel_schedule(), at=now, home_address=home_address)
+    anchor = resolve_anchor(
+        load_travel_schedule(), at=now, home_address=home_address, home_metros=home_metro_names()
+    )
     return anchor.address

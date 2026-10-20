@@ -8,9 +8,14 @@ record's `phase_markers` dict so the agent isn't notified twice
 
 Three time-based events:
 
-- `day_before` — fires at T-24h before scheduled departure (capability
-  2: day-before sanity check — agent composes a calendar-conflict
-  + booking-diff message)
+- `day_before` — fires once `now ≥ scheduled_dep − 24h` (capability 2:
+  day-before sanity check — agent composes a calendar-conflict + booking-
+  diff message). A flight first seen inside that window (a post-misconnect
+  rebook, a late add) fires at whatever T-minus it happens to be, often the
+  same local day, so the payload carries the REAL `hours_until_dep` and a
+  `day_label` (today / tomorrow / `YYYY-MM-DD`) resolved against the
+  operator's local date by `day_label()` — the compose renders the label
+  verbatim instead of doing date math off a constant (#300).
 - `time_to_leave` — fires when `now + travel_time + buffer ≥
   scheduled_dep_time` (capability 1: traffic-aware leave-by alert)
 - `arrival_logistics` — fires at scheduled_arr_time − 15 min
@@ -30,7 +35,9 @@ stdlib-only: `datetime` per `coding-policy: dependency-management`.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import sys
+from datetime import UTC, datetime, timedelta
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from wake_rules import is_real_boarding
 
@@ -47,8 +54,31 @@ GATE_ASSIGNMENT_WINDOW_LEAD_MINUTES = 60
 # (#102) or "head to terminal X" (#103) — is moot: the flight has already left
 # or won't go. Real boarding is detected separately via wake_rules.is_real_boarding;
 # byAir flips computed_status to "boarding" up to ~1h early, so the raw label
-# alone is not trustworthy (#54).
+# alone is not trustworthy (#54), and its detail can already read "Boarding now"
+# while premature, so the label is also held against the planned boarding
+# window (#295) wherever the caller knows the boarding lead.
 _BOARDING_OR_GONE_STATUSES = frozenset({"departed", "en_route", "landed", "cancelled", "diverted"})
+
+
+def day_before_due(
+    *,
+    scheduled_dep_time: str | None,
+    phase_markers: dict,
+    now_utc: datetime,
+) -> bool:
+    """Whether `check_day_before` would fire now — the gate alone, no payload.
+
+    The precheck asks this first and resolves the operator's zone only when it
+    is True, so the zone reader never spawns for a flight whose `day_before`
+    is not firing this cycle: already fired, unparseable departure, or more
+    than `DAY_BEFORE_HOURS` out (#300).
+    """
+    if phase_markers.get("day_before_fired"):
+        return False
+    dep_dt = _parse_iso8601(scheduled_dep_time)
+    if dep_dt is None:
+        return False
+    return now_utc >= dep_dt - timedelta(hours=DAY_BEFORE_HOURS)
 
 
 def check_day_before(
@@ -56,29 +86,83 @@ def check_day_before(
     scheduled_dep_time: str | None,
     phase_markers: dict,
     now_utc: datetime,
+    operator_tz: str | None = None,
 ) -> tuple[bool, dict | None]:
     """T-24h gate. Returns (should_fire, event_payload).
 
     `phase_markers["day_before_fired"]` must be False to fire; once
     fired the caller sets it to True. `now_utc` must be timezone-aware
     UTC (callers use `datetime.now(timezone.utc)`).
+
+    The gate is unchanged from v0.1; the payload is not. `hours_until_dep`
+    is the real whole hours from `now_utc` to departure (24 at the exact
+    threshold, 7 for a flight first tracked ~7h50m out, negative for one
+    first seen after it left) — the old constant 24 read as "tomorrow" to
+    the compose whatever the clock said (#300). `day_label` / `day_label_tz`
+    come from `day_label()` below: `operator_tz` is the operator's current
+    IANA zone as the core `current-tz` reader resolved it, or None when no
+    zone is available; the caller resolves it, this function stays pure.
     """
-    if phase_markers.get("day_before_fired"):
+    if not day_before_due(
+        scheduled_dep_time=scheduled_dep_time, phase_markers=phase_markers, now_utc=now_utc
+    ):
         return (False, None)
     dep_dt = _parse_iso8601(scheduled_dep_time)
-    if dep_dt is None:
-        return (False, None)
-    threshold = dep_dt - timedelta(hours=DAY_BEFORE_HOURS)
-    if now_utc < threshold:
-        return (False, None)
+    assert dep_dt is not None  # day_before_due returned True, so it parsed
+    label, label_tz = day_label(dep_dt, now_utc=now_utc, operator_tz=operator_tz)
     return (
         True,
         {
             "reason": "day_before",
             "scheduled_dep_time": scheduled_dep_time,
-            "hours_until_dep": DAY_BEFORE_HOURS,
+            "hours_until_dep": int((dep_dt - now_utc).total_seconds() // 3600),
+            "day_label": label,
+            "day_label_tz": label_tz,
         },
     )
+
+
+def day_label(
+    dep_dt: datetime, *, now_utc: datetime, operator_tz: str | None
+) -> tuple[str, str | None]:
+    """The day word for a departure, resolved against the operator's local date.
+
+    Returns `(label, zone)`. With a resolvable `operator_tz`, both instants
+    are expressed in that zone and their calendar dates compared: the same
+    date is `"today"`, the next is `"tomorrow"`, anything else is the
+    operator-local ISO date (`YYYY-MM-DD`), and `zone` names the zone the
+    comparison ran in. That is the comparison `rules/operator-local-tz-
+    phrasing.md` prescribes, done here deterministically so the compose
+    renders it instead of re-deriving it (#300).
+
+    With no usable zone (`None`, or a name `ZoneInfo` cannot resolve) the
+    label is the explicit date the departure carries in its OWN offset —
+    `dep_dt` keeps the airport-local offset the RFC 3339 string had — and
+    `zone` is None. The container's UTC date is never the fallback: it is
+    the wrong date for hours around midnight, which is exactly when a
+    relative word misleads. A zone name that does not resolve is reported
+    here on stderr, naming the zone, and the fallback label still goes out.
+    """
+    if operator_tz:
+        try:
+            zone = ZoneInfo(operator_tz)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            print(
+                f"phase_markers.day_label: operator zone {operator_tz!r} does not resolve "
+                f"({exc}); labelling with the departure's own date — check the host "
+                "tz_state row the core current-tz reader serves",
+                file=sys.stderr,
+            )
+            zone = None
+        if zone is not None:
+            local_event = dep_dt.astimezone(zone).date()
+            local_now = now_utc.astimezone(zone).date()
+            if local_event == local_now:
+                return "today", operator_tz
+            if local_event == local_now + timedelta(days=1):
+                return "tomorrow", operator_tz
+            return local_event.isoformat(), operator_tz
+    return dep_dt.date().isoformat(), None
 
 
 def check_time_to_leave(
@@ -88,6 +172,7 @@ def check_time_to_leave(
     phase_markers: dict,
     now_utc: datetime,
     snapshot: dict | None = None,
+    boarding_lead_minutes: int | None = None,
 ) -> tuple[bool, dict | None]:
     """Traffic-aware "leave by" gate. Returns (should_fire, event_payload).
 
@@ -108,11 +193,25 @@ def check_time_to_leave(
     the gate stays silent rather than waking the agent to say nothing. Defaults
     to None so callers without a snapshot keep the pre-boarding behavior.
 
+    `boarding_lead_minutes` is the flight's resolved boarding lead. When given,
+    a "boarding" label before the planned boarding window (`scheduled_dep −
+    lead`) is premature and does NOT suppress the alert (#295); None keeps the
+    label-plus-detail predicate alone.
+
     `phase_markers["time_to_leave_fired"]` must be False to fire.
     """
     if phase_markers.get("time_to_leave_fired"):
         return (False, None)
-    if is_boarding_or_gone(snapshot):
+    window_open = (
+        None
+        if boarding_lead_minutes is None
+        else boarding_window_open(
+            scheduled_dep_time=scheduled_dep_time,
+            boarding_lead_minutes=boarding_lead_minutes,
+            snapshot=snapshot,
+        )
+    )
+    if is_boarding_or_gone(snapshot, boarding_window_open=window_open, at=now_utc):
         return (False, None)
     if travel_time_seconds is None:
         return (False, None)
@@ -167,6 +266,36 @@ def check_arrival_logistics(
     )
 
 
+def boarding_window_open(
+    *,
+    scheduled_dep_time: str | None,
+    boarding_lead_minutes: int,
+    snapshot: dict | None = None,
+) -> datetime | None:
+    """The instant boarding is planned to begin, or None if no departure parses.
+
+    `effective_dep − boarding_lead` — the start of the boarding calendar block
+    flight-assist itself creates. The effective departure is byAir's live
+    `dep_time` when the snapshot carries a parseable one, else the scheduled
+    time: the same preference `calendar_reconcile._effective_times` gives the
+    block, so a delayed or revised departure moves the block and this window
+    together and byAir's early "boarding" flip on a delayed flight is still
+    held to the block's own start. A present-but-unparseable `dep_time` falls
+    back to the scheduled time here (the block planner surfaces it instead) —
+    a wake gate with no window at all would let the premature label through.
+    byAir claiming "boarding" before this instant is premature by
+    construction; `wake_rules.is_real_boarding` holds the label against it
+    (#295).
+    """
+    live = (snapshot or {}).get("dep_time")
+    dep_dt = _parse_iso8601(live) if isinstance(live, str) else None
+    if dep_dt is None:
+        dep_dt = _parse_iso8601(scheduled_dep_time)
+    if dep_dt is None:
+        return None
+    return dep_dt - timedelta(minutes=boarding_lead_minutes)
+
+
 def gate_assignment_window_open(
     *,
     scheduled_dep_time: str | None,
@@ -178,14 +307,12 @@ def gate_assignment_window_open(
     readout (`check_gate_assignment`) only fires once now is at/after this
     boundary (#103).
     """
-    dep_dt = _parse_iso8601(scheduled_dep_time)
-    if dep_dt is None:
-        return None
-    return (
-        dep_dt
-        - timedelta(minutes=boarding_lead_minutes)
-        - timedelta(minutes=GATE_ASSIGNMENT_WINDOW_LEAD_MINUTES)
+    boarding_open = boarding_window_open(
+        scheduled_dep_time=scheduled_dep_time, boarding_lead_minutes=boarding_lead_minutes
     )
+    if boarding_open is None:
+        return None
+    return boarding_open - timedelta(minutes=GATE_ASSIGNMENT_WINDOW_LEAD_MINUTES)
 
 
 def check_gate_assignment(
@@ -208,7 +335,10 @@ def check_gate_assignment(
 
     A flight `is_boarding_or_gone` — really boarding, or departed/en_route/
     landed/cancelled/diverted — gets no readout; navigating to a departure gate
-    is moot by then (same gate as the leave-by suppression in #102).
+    is moot by then (same gate as the leave-by suppression in #102). "Really
+    boarding" is held against the planned boarding window derived from the
+    same `boarding_lead_minutes` (#295), so byAir's premature label does not
+    swallow the readout.
 
     `phase_markers["gate_assignment_fired"]` must be False to fire; the
     caller sets it True once fired so subsequent gate moves surface as
@@ -216,7 +346,12 @@ def check_gate_assignment(
     """
     if phase_markers.get("gate_assignment_fired"):
         return (False, None)
-    if is_boarding_or_gone(snapshot):
+    boarding_open = boarding_window_open(
+        scheduled_dep_time=scheduled_dep_time,
+        boarding_lead_minutes=boarding_lead_minutes,
+        snapshot=snapshot,
+    )
+    if is_boarding_or_gone(snapshot, boarding_window_open=boarding_open, at=now_utc):
         return (False, None)
     window_open = gate_assignment_window_open(
         scheduled_dep_time=scheduled_dep_time,
@@ -239,7 +374,12 @@ def check_gate_assignment(
     )
 
 
-def is_boarding_or_gone(snapshot: dict | None) -> bool:
+def is_boarding_or_gone(
+    snapshot: dict | None,
+    *,
+    boarding_window_open: datetime | None = None,
+    at: datetime | None = None,
+) -> bool:
     """True when an airport-bound prompt no longer makes sense for this flight.
 
     The flight is either really boarding (per `wake_rules.is_real_boarding`,
@@ -247,10 +387,15 @@ def is_boarding_or_gone(snapshot: dict | None) -> bool:
     moved past departure (or it won't go). Either way the user is at — or past —
     the gate, so neither the leave-by gate (#102) nor the gate/terminal readout
     (#103) should fire.
+
+    `boarding_window_open` / `at` pass straight through to `is_real_boarding`:
+    with both, a "boarding" label polled before the planned boarding window is
+    premature and does not count (#295); without, the label-plus-detail
+    predicate alone decides.
     """
     if not snapshot:
         return False
-    if is_real_boarding(snapshot):
+    if is_real_boarding(snapshot, boarding_window_open=boarding_window_open, at=at):
         return True
     return snapshot.get("computed_status") in _BOARDING_OR_GONE_STATUSES
 
@@ -273,5 +418,5 @@ def _parse_iso8601(value: str | None) -> datetime | None:
     except ValueError:
         return None
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
     return parsed

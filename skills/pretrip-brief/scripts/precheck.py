@@ -8,13 +8,21 @@ import os
 import re
 import subprocess
 import tempfile
-from datetime import datetime, time, timedelta, timezone
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 GROUP = Path(os.environ.get("NANOCLAW_GROUP_DIR", "/workspace/group"))
 SKILLS = Path("/home/node/.claude/skills")
 FLIGHTY = Path(os.environ.get("FLIGHTY_SNAPSHOT_DIR", "/workspace/extra/flighty"))
+
+
+def seatwifi_url(code):
+    """Public lookup only; no request, date-specific claim, or airline inference."""
+    normalized = re.sub(r"\s+", "", str(code or "")).upper()
+    if not re.fullmatch(r"(?=[A-Z0-9]{2}\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{2}[1-9]\d{0,3}", normalized):
+        return None
+    return "https://seatwifi.com/flights/" + normalized.lower()
 
 
 def instant(value):
@@ -249,6 +257,8 @@ def collect_flights(now):
             flights[flight_identity(flight)] = flight
     except (OSError, ValueError, KeyError, TypeError):
         errors.append("TripIt itinerary cache unavailable")
+    for flight in flights.values():
+        flight["wifi_lookup_url"] = seatwifi_url(flight.get("code"))
     return list(flights.values()), list(dict.fromkeys(errors))
 
 
@@ -258,7 +268,7 @@ def main():
     parser.add_argument("--mark-sent", nargs="+")
     parser.add_argument("--message-id")
     args = parser.parse_args()
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     sent_path = GROUP / "pretrip-brief-sent.json"
     sent = json.loads(sent_path.read_text()) if sent_path.exists() else {}
     if args.mark_sent:

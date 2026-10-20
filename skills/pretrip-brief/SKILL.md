@@ -67,6 +67,17 @@ Google flight/OOO blocks are intentionally off.
 
 ## 3. Send and record
 
+Include one compact **Wi-Fi: [SeatWiFi lookup](URL)** link per flight leg,
+using `wifi_lookup_url` from the precheck. Older pending data can use
+`seatwifi_url(flight_code)` from `scripts/precheck.py`. Omit invalid/missing
+flight codes. These are public flight-number lookup links, not verified Wi-Fi
+reports: do not infer provider, price, speed, or availability from a link.
+No SeatWiFi account, API key, paid plan, scraping, or network lookup is needed.
+The page may lack the flight or reflect a different date/aircraft; say once
+that Wi-Fi depends on the assigned aircraft. A known codeshare should use the
+operating flight only when verified; never guess its code. Missing SeatWiFi
+information must not delay the brief or trigger a second message.
+
 Send one concise briefing per connected journey via `mcp__nanoclaw__send_message_to_chat`
 with `chat_id: "tg:-1004328299876"` (the authorized main swarm). This synchronous
 host operation returns `sent_message_id` only after Telegram accepts delivery.

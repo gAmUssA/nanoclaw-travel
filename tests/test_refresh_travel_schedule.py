@@ -25,11 +25,11 @@ the `DTEND < now` filter is deterministic and patch
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pytest
 
-_FROZEN_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=timezone.utc)
+_FROZEN_NOW = datetime(2026, 4, 30, 12, 0, 0, tzinfo=UTC)
 
 
 def _make_frozen_datetime(real_datetime):

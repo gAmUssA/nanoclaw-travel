@@ -56,7 +56,7 @@ Writes: /workspace/group/travel-trips-seen.json  (--commit only)
 import json
 import os
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 DB_PATH = "/workspace/group/travel-db.json"
 SEEN_PATH = "/workspace/group/travel-trips-seen.json"
@@ -193,7 +193,7 @@ def _write_snapshot(trips: dict) -> None:
     build-travel-db.py's write."""
     payload = {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "generated_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "trips": trips,
     }
     tmp_path = SEEN_PATH + ".tmp"

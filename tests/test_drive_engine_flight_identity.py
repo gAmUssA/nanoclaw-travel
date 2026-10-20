@@ -11,7 +11,7 @@ survive.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -27,7 +27,7 @@ from flight_identity import (  # noqa: E402
     merge_flights,
 )
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _dt(y, mo, d, h, mi=0, *, offset_hours=0):

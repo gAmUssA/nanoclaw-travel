@@ -36,7 +36,7 @@ from __future__ import annotations
 import json
 import re
 import sys
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 # travel-core owns the `Check-in:` / `Check-out:` discriminator. Runtime mount
@@ -170,7 +170,7 @@ def main() -> None:
     warnings = find_garbage_lodging(schedule, today)
     output = {
         "garbage_lodging": warnings,
-        "checked_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "checked_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
     }
     print(json.dumps(output, ensure_ascii=False, indent=2))
 

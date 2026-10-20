@@ -7,8 +7,10 @@ The same client is the shared ground-transit time source for the
 `drive-engine` sweep (meetings and airports alike).
 
 Routing chain (mission-critical — "I don't like to be late"):
-    1. Google Distance Matrix (primary). Free-form origin/destination
-       strings, returns duration with and without traffic in one call.
+    1. Google Routes or legacy Distance Matrix (primary). Free-form
+       origin/destination strings, with and without traffic in one call.
+       from_env reads the backend from /workspace/global/google-maps.json;
+       absent configuration preserves the legacy Distance Matrix behavior.
     2. TomTom (backup), used only when Google fails. TomTom routing is
        coordinates-only, so the backup is *geocode each endpoint →
        route between the coordinates*, not a drop-in. The resulting
@@ -46,13 +48,21 @@ Errors:
 from __future__ import annotations
 
 import json
+import math
 import os
+import re
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
 
 _GOOGLE_ENDPOINT = "https://maps.googleapis.com/maps/api/distancematrix/json"
+_GOOGLE_ROUTES_ENDPOINT = "https://routes.googleapis.com/directions/v2:computeRoutes"
+
+# A `"lat,lon"` place, routed without geocoding.
+_COORDINATES = re.compile(r"(-?\d{1,3}(?:\.\d+)?),\s*(-?\d{1,3}(?:\.\d+)?)")
+
 _TOMTOM_GEOCODE_ENDPOINT = "https://api.tomtom.com/search/2/geocode"
 _TOMTOM_ROUTE_ENDPOINT = "https://api.tomtom.com/routing/1/calculateRoute"
 
@@ -149,12 +159,18 @@ class TomTomClient:
         if not origin or not destination:
             raise ValueError("travel_time: origin and destination are required")
 
-        origin_lat, origin_lon, origin_resolved = self._geocode(origin)
-        dest_lat, dest_lon, dest_resolved = self._geocode(destination)
-        return self._route(
-            (origin_lat, origin_lon, origin_resolved),
-            (dest_lat, dest_lon, dest_resolved),
-        )
+        return self._route(self._locate(origin), self._locate(destination))
+
+    def _locate(self, place: str) -> tuple[float, float, str]:
+        """`(lat, lon, resolved)` for a place: a `"lat,lon"` pair is taken as is
+        (the drive engine routes airports by coordinates, #334), anything else
+        is geocoded."""
+        point = _COORDINATES.fullmatch(place.strip())
+        if point is not None:
+            lat, lon = float(point.group(1)), float(point.group(2))
+            if -90.0 <= lat <= 90.0 and -180.0 <= lon <= 180.0:
+                return lat, lon, place.strip()
+        return self._geocode(place)
 
     def _geocode(self, query: str) -> tuple[float, float, str]:
         encoded = urllib.parse.quote(query, safe="")
@@ -236,9 +252,9 @@ class TomTomClient:
 
 
 class MapsClient:
-    """Google Distance Matrix primary with an optional TomTom backup.
+    """Google routing primary with an optional TomTom backup.
 
-    Each `travel_time()` call is one billable Google Distance Matrix
+    Each `travel_time()` call is one billable Google routing
     request (and, only on Google failure, up to three TomTom requests).
     Cache aggressively at the caller level — for the time-to-leave
     capability, one or two queries per flight per day is the target.
@@ -250,16 +266,19 @@ class MapsClient:
         *,
         timeout: float = 10.0,
         tomtom: TomTomClient | None = None,
+        backend: str = "distance-matrix",
     ):
         if not api_key:
             raise ValueError(
                 "MapsClient: api_key is empty — set GOOGLE_MAPS_API_KEY in the env "
-                "(generate at https://console.cloud.google.com/apis/credentials and "
-                "enable the Distance Matrix API)"
+                "(store a Maps API key in OneCLI and enable the configured routing API)"
             )
+        if backend not in {"routes", "distance-matrix"}:
+            raise ValueError("Google Maps backend must be routes or distance-matrix")
         self._api_key = api_key
         self._timeout = timeout
         self._tomtom = tomtom
+        self._backend = backend
 
     @classmethod
     def from_env(
@@ -268,6 +287,7 @@ class MapsClient:
         env_var: str = "GOOGLE_MAPS_API_KEY",
         tomtom_env_var: str = "TOMTOM_API_KEY",
         timeout: float = 10.0,
+        config_path: str | Path = "/workspace/global/google-maps.json",
     ) -> MapsClient:
         """Construct from GOOGLE_MAPS_API_KEY, wiring the TomTom backup.
 
@@ -277,14 +297,20 @@ class MapsClient:
         api_key = os.environ.get(env_var, "")
         if not api_key:
             raise ValueError(
-                f"MapsClient.from_env: ${env_var} is unset — generate a Distance Matrix "
-                f"API key at https://console.cloud.google.com/apis/credentials and add "
-                f"it to OneCLI vault"
+                f"MapsClient.from_env: ${env_var} is unset — add a Maps API key "
+                f"to OneCLI vault and enable the configured routing API"
             )
+        try:
+            config = json.loads(Path(config_path).read_text())
+        except FileNotFoundError:
+            config = {}
+        if not isinstance(config, dict):
+            raise ValueError("Google Maps configuration must be a JSON object")
+        backend = config.get("backend", "distance-matrix")
         tomtom = None
         if os.environ.get(tomtom_env_var):
             tomtom = TomTomClient.from_env(env_var=tomtom_env_var, timeout=timeout)
-        return cls(api_key, timeout=timeout, tomtom=tomtom)
+        return cls(api_key, timeout=timeout, tomtom=tomtom, backend=backend)
 
     def travel_time(self, origin: str, destination: str) -> TravelTime:
         """Return travel time for one origin→destination pair.
@@ -322,8 +348,50 @@ class MapsClient:
         Uses `departure_time=now` + `traffic_model=best_guess` so the
         response includes a current-traffic estimate.
         """
+        if self._backend == "routes":
+            return self._routes_travel_time(origin, destination)
         payload = _get_json(self._build_url(origin, destination), self._timeout)
         return self._parse(payload)
+
+    def _routes_travel_time(self, origin: str, destination: str) -> TravelTime:
+        """Routes duration includes traffic; staticDuration excludes it."""
+        body = {
+            "origin": _routes_waypoint(origin),
+            "destination": _routes_waypoint(destination),
+            "travelMode": "DRIVE",
+            "routingPreference": "TRAFFIC_AWARE",
+        }
+        request = urllib.request.Request(
+            _GOOGLE_ROUTES_ENDPOINT,
+            data=json.dumps(body).encode(),
+            headers={
+                "Content-Type": "application/json",
+                "X-Goog-Api-Key": self._api_key,
+                "X-Goog-FieldMask": "routes.duration,routes.staticDuration,routes.distanceMeters",
+            },
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=self._timeout) as response:
+            payload = json.loads(response.read())
+        routes = payload.get("routes")
+        if not routes:
+            raise MapsError("ZERO_RESULTS", "Google Routes returned no route")
+        route = routes[0]
+        duration = _routes_duration(route.get("staticDuration"))
+        in_traffic = _routes_duration(route.get("duration"))
+        distance = route.get("distanceMeters")
+        if type(distance) is not int or distance < 0:
+            raise MapsError("MALFORMED_RESPONSE", "Google Routes distance is missing or invalid")
+        return TravelTime(
+            duration_seconds=duration,
+            in_traffic_seconds=in_traffic,
+            traffic_factor=_traffic_factor(duration, in_traffic),
+            distance_meters=distance,
+            # Routes does not return normalized addresses in this field mask.
+            origin_resolved=origin,
+            destination_resolved=destination,
+            source="google",
+        )
 
     def _build_url(self, origin: str, destination: str) -> str:
         query = urllib.parse.urlencode(
@@ -385,3 +453,28 @@ class MapsClient:
             destination_resolved=destinations[0],
             source="google",
         )
+
+
+def _routes_duration(value: object) -> int:
+    if not isinstance(value, str) or not re.fullmatch(r"\d+(?:\.\d{1,9})?s", value):
+        raise MapsError("MALFORMED_RESPONSE", "Google Routes duration is missing or invalid")
+    seconds = float(value[:-1])
+    if not math.isfinite(seconds):
+        raise MapsError("MALFORMED_RESPONSE", "Google Routes duration is not finite")
+    return math.ceil(seconds)
+
+
+def _routes_waypoint(value: str) -> dict:
+    """Accept the address strings and GPS coordinates used by travel origins."""
+    if value.startswith("place_id:"):
+        return {"placeId": value.removeprefix("place_id:")}
+    parts = value.split(",")
+    if len(parts) == 2:
+        try:
+            lat, lon = (float(part.strip()) for part in parts)
+        except ValueError:
+            pass
+        else:
+            if -90 <= lat <= 90 and -180 <= lon <= 180:
+                return {"location": {"latLng": {"latitude": lat, "longitude": lon}}}
+    return {"address": value}

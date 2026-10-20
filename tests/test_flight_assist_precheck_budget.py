@@ -24,8 +24,10 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "skills" / "flight-assist"))
+sys.path.insert(0, str(REPO_ROOT / "skills" / "travel-core"))
 
 import precheck  # noqa: E402
+from operator_tz import READER_TIMEOUT_SECONDS  # noqa: E402
 
 SKILL_MD = REPO_ROOT / "skills" / "flight-assist" / "SKILL.md"
 
@@ -91,4 +93,29 @@ def test_cycle_budget_leaves_room_for_one_in_flight_poll() -> None:
     assert worst_case_in_flight <= precheck._SCRIPT_KILL_BUDGET_SECONDS, (
         "a poll started at the budget edge can outlive the kill: "
         f"{worst_case_in_flight}s > {precheck._SCRIPT_KILL_BUDGET_SECONDS}s"
+    )
+
+
+def test_budget_leaves_room_for_the_zone_reader_on_a_flight_that_may_spawn_it() -> None:
+    """A single `_process_flight` can make three bounded calls in sequence: the
+    byAir poll, the operator-zone reader spawn for a `day_before` label (#300),
+    and the Maps travel-time query. The base headroom covers byAir, Maps and
+    teardown; a flight that may still spawn the reader must start
+    `_READER_RESERVE_SECONDS` earlier (#312). Either way a flight started at its
+    own deadline returns before the kill."""
+    base_worst = (
+        precheck._BYAIR_CALL_TIMEOUT_SECONDS
+        + precheck._MAPS_CALL_TIMEOUT_SECONDS
+        + precheck._INTERPRETER_TEARDOWN_HEADROOM_SECONDS
+    )
+    assert precheck._CYCLE_WALL_CLOCK_BUDGET_SECONDS + base_worst <= (
+        precheck._SCRIPT_KILL_BUDGET_SECONDS
+    )
+    assert precheck._READER_RESERVE_SECONDS >= READER_TIMEOUT_SECONDS
+    spawning_deadline = precheck._CYCLE_WALL_CLOCK_BUDGET_SECONDS - (
+        precheck._READER_RESERVE_SECONDS
+    )
+    assert spawning_deadline > 0, "the reserve would leave a spawning flight no budget"
+    assert spawning_deadline + base_worst + READER_TIMEOUT_SECONDS <= (
+        precheck._SCRIPT_KILL_BUDGET_SECONDS
     )

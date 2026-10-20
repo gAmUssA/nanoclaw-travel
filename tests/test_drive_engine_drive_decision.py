@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -38,7 +38,7 @@ from drive_decision import (  # noqa: E402
     record_operator_answer,
 )
 
-UTC = timezone.utc
+UTC = UTC
 NOW = datetime(2020, 8, 7, 12, 0, tzinfo=UTC)
 EXPIRES = datetime(2020, 8, 17, 0, 0, tzinfo=UTC)
 KEY = "tn-tigers-2020-08"

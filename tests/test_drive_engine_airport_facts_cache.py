@@ -57,10 +57,54 @@ def test_persists_none_flag_and_timezone():
 
 
 def test_written_file_is_versioned_and_string_keyed(facts_env):
-    store_static_facts({3: StaticAirport(iata="JFK", flag="🇺🇸", timezone="America/New_York")})
+    store_static_facts(
+        {
+            3: StaticAirport(
+                iata="JFK", flag="🇺🇸", timezone="America/New_York", lat=40.6413, lon=-73.7781
+            )
+        }
+    )
     payload = json.loads(facts_env.read_text(encoding="utf-8"))
-    assert payload["schema_version"] == AIRPORT_FACTS_SCHEMA_VERSION
-    assert payload["airports"] == {"3": {"iata": "JFK", "flag": "🇺🇸", "tz": "America/New_York"}}
+    assert payload["schema_version"] == AIRPORT_FACTS_SCHEMA_VERSION == 2
+    assert payload["airports"] == {
+        "3": {
+            "iata": "JFK",
+            "flag": "🇺🇸",
+            "tz": "America/New_York",
+            "lat": 40.6413,
+            "lon": -73.7781,
+        }
+    }
+    assert load_static_facts()[3].has_coordinates
+
+
+def test_a_version_1_file_reads_without_coordinates(facts_env):
+    """The owner reads its older version; the sweep refetches the coordinates."""
+    facts_env.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "airports": {"3": {"iata": "JFK", "flag": "🇺🇸", "tz": "America/New_York"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    fact = load_static_facts()[3]
+    assert (fact.iata, fact.timezone, fact.has_coordinates) == ("JFK", "America/New_York", False)
+    rewritten = json.loads(facts_env.read_text(encoding="utf-8"))
+    assert rewritten["schema_version"] == 2
+    assert rewritten["airports"]["3"]["iata"] == "JFK"
+
+
+@pytest.mark.parametrize("lat", [91, "40.6", True, float("nan")])
+def test_a_bad_coordinate_reads_as_absent(facts_env, lat):
+    facts_env.write_text(
+        json.dumps(
+            {"schema_version": 2, "airports": {"3": {"iata": "JFK", "lat": lat, "lon": -73.7}}}
+        ),
+        encoding="utf-8",
+    )
+    assert load_static_facts()[3].lat is None
 
 
 def test_corrupt_file_degrades_to_empty(facts_env, capsys):

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import sys
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -25,7 +25,7 @@ from meeting_source import (  # noqa: E402
     meeting_desired_blocks,
 )
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _dt(h, mi=0, *, day=13):
@@ -64,7 +64,7 @@ def test_outbound_leg_builds_arrive_by_anchored_block():
         "Swimming Practice",
         (FakeLeg("outbound", "Home", "Pool", arrive_by=_dt(9, 0)),),
     )
-    blocks, skipped = meeting_desired_blocks([m], route=const_route(27))
+    blocks, skipped, _held = meeting_desired_blocks([m], route=const_route(27))
     assert skipped == []
     assert len(blocks) == 1
     b = blocks[0]
@@ -81,7 +81,7 @@ def test_return_leg_builds_depart_after_anchored_block():
     m = FakeMeeting(
         "m1", "Swimming Practice", (FakeLeg("return", "Pool", "Home", depart_after=_dt(11, 0)),)
     )
-    blocks, _ = meeting_desired_blocks([m], route=const_route(27))
+    blocks, _, _held = meeting_desired_blocks([m], route=const_route(27))
     b = blocks[0]
     assert b.kind == "meeting_return"
     assert b.start == _dt(11, 0)
@@ -97,7 +97,7 @@ def test_outbound_and_return_are_distinct_blocks():
             FakeLeg("return", "Pool", "Home", depart_after=_dt(11)),
         ),
     )
-    blocks, _ = meeting_desired_blocks([m], route=const_route(20))
+    blocks, _, _held = meeting_desired_blocks([m], route=const_route(20))
     kinds = sorted(b.kind for b in blocks)
     assert kinds == ["meeting_outbound", "meeting_return"]
 
@@ -110,14 +110,14 @@ def test_implausible_drive_is_suppressed():
     m = FakeMeeting(
         "m1", "Swimming Practice", (FakeLeg("outbound", "Copenhagen", "Pool TN", arrive_by=_dt(9)),)
     )
-    blocks, skipped = meeting_desired_blocks([m], route=const_route(9 * 60))  # 9h
+    blocks, skipped, _held = meeting_desired_blocks([m], route=const_route(9 * 60))  # 9h
     assert blocks == []
     assert any("implausible" in s and "suppressed" in s for s in skipped)
 
 
 def test_plausible_drive_at_threshold_kept():
     m = FakeMeeting("m1", "Offsite", (FakeLeg("outbound", "Home", "Venue", arrive_by=_dt(9)),))
-    blocks, _ = meeting_desired_blocks([m], route=const_route(180))  # exactly 3h
+    blocks, _, _held = meeting_desired_blocks([m], route=const_route(180))  # exactly 3h
     assert len(blocks) == 1
 
 
@@ -129,7 +129,7 @@ def test_bridge_drive_longer_than_gap_is_suppressed():
         "Second meeting",
         (FakeLeg("bridge", "Venue A", "Venue B", arrive_by=_dt(9), gap_seconds=45 * 60),),
     )
-    blocks, skipped = meeting_desired_blocks([m], route=const_route(90))  # 90min > 45min gap
+    blocks, skipped, _held = meeting_desired_blocks([m], route=const_route(90))  # 90min > 45min gap
     assert blocks == []
     assert any("exceeds the" in s and "gap" in s for s in skipped)
 
@@ -140,7 +140,7 @@ def test_bridge_drive_within_gap_is_kept():
         "Second meeting",
         (FakeLeg("bridge", "Venue A", "Venue B", arrive_by=_dt(9), gap_seconds=45 * 60),),
     )
-    blocks, _ = meeting_desired_blocks([m], route=const_route(20))  # 20min < 45min gap
+    blocks, _, _held = meeting_desired_blocks([m], route=const_route(20))  # 20min < 45min gap
     assert len(blocks) == 1
     assert blocks[0].kind == "meeting_outbound"
 
@@ -154,21 +154,21 @@ def test_unresolved_anchor_is_skipped():
         "Meeting",
         (FakeLeg("outbound", None, None, arrive_by=_dt(9), anchor_note="on trip, no lodging yet"),),
     )
-    blocks, skipped = meeting_desired_blocks([m], route=const_route(20))
+    blocks, skipped, _held = meeting_desired_blocks([m], route=const_route(20))
     assert blocks == []
     assert any("no lodging" in s for s in skipped)
 
 
 def test_route_failure_is_skipped():
     m = FakeMeeting("m1", "Meeting", (FakeLeg("outbound", "Home", "Venue", arrive_by=_dt(9)),))
-    blocks, skipped = meeting_desired_blocks([m], route=lambda o, d: None)
+    blocks, skipped, _held = meeting_desired_blocks([m], route=lambda o, d: None)
     assert blocks == []
     assert any("route failed" in s for s in skipped)
 
 
 def test_meeting_with_no_legs_yields_nothing():
     m = FakeMeeting("m1", "Virtual standup", ())
-    blocks, skipped = meeting_desired_blocks([m], route=const_route(20))
+    blocks, skipped, _held = meeting_desired_blocks([m], route=const_route(20))
     assert blocks == [] and skipped == []
 
 
@@ -238,6 +238,75 @@ def test_exclude_keeps_legacy_dp_blocks_for_scan_has_block():
     assert "m1" in kept
 
 
+# --- display zone (#301) ----------------------------------------------------
+
+
+def test_display_tz_overrides_the_meeting_zone():
+    """A source event with a stale `+02:00` offset on an `America/Chicago`
+    event scans to `Etc/GMT-2`; the block must render on the operator's clock."""
+    m = FakeMeeting(
+        "m1",
+        "Baruch 1:1",
+        (FakeLeg("outbound", "Home", "1004 Nelson Merry St", arrive_by=_dt(19, 0)),),
+        timezone="Etc/GMT-2",
+    )
+    blocks, skipped, _held = meeting_desired_blocks(
+        [m], route=const_route(38), display_tz="America/Chicago"
+    )
+    assert skipped == []
+    assert [b.timezone for b in blocks] == ["America/Chicago"]
+    assert blocks[0].end == _dt(19, 0)  # the instant is untouched
+
+
+def test_no_display_tz_keeps_the_meeting_zone():
+    m = FakeMeeting(
+        "m1",
+        "Baruch 1:1",
+        (FakeLeg("outbound", "Home", "1004 Nelson Merry St", arrive_by=_dt(19, 0)),),
+        timezone="Etc/GMT-2",
+    )
+    blocks, _, _held = meeting_desired_blocks([m], route=const_route(38), display_tz=None)
+    assert [b.timezone for b in blocks] == ["Etc/GMT-2"]
+    assert [b.zone_from_operator for b in blocks] == [False]
+
+
+def test_display_tz_marks_the_block_zone_as_the_operators():
+    """#309: only an operator-supplied zone may re-patch an existing block."""
+    m = FakeMeeting(
+        "m1",
+        "Baruch 1:1",
+        (FakeLeg("outbound", "Home", "1004 Nelson Merry St", arrive_by=_dt(19, 0)),),
+        timezone="Etc/GMT-2",
+    )
+    blocks, _, _held = meeting_desired_blocks(
+        [m], route=const_route(38), display_tz="America/Chicago"
+    )
+    assert [b.zone_from_operator for b in blocks] == [True]
+
+
+# --- a leg whose origin is its destination (#301) ---------------------------
+
+
+def test_leg_from_the_anchor_to_the_anchor_is_skipped():
+    """A home→home leg is a zero-length drive that still lands as a degenerate
+    one-minute block. No block, one diagnostic."""
+    m = FakeMeeting(
+        "m1",
+        "ExamOne Appointment",
+        (FakeLeg("outbound", "Home", "Home", arrive_by=_dt(15, 0)),),
+    )
+    calls: list[tuple[str, str]] = []
+
+    def route(o, d):
+        calls.append((o, d))
+        return timedelta(0)
+
+    blocks, skipped, _held = meeting_desired_blocks([m], route=route)
+    assert blocks == []
+    assert skipped == ["meeting m1 outbound: origin is the destination — no drive"]
+    assert calls == []  # never routed
+
+
 # --- trips the operator drives to (#242) ------------------------------------
 
 
@@ -254,7 +323,7 @@ def test_away_suppression_still_fires_for_a_meeting_off_any_trip():
     meeting = FakeMeeting(
         "m1", "Swim practice", (FakeLeg("outbound", HOME_ADDR, VENUE, arrive_by=_dt(20)),)
     )
-    blocks, skipped = meeting_desired_blocks([meeting], route=const_route(234))
+    blocks, skipped, _held = meeting_desired_blocks([meeting], route=const_route(234))
     assert blocks == []
     assert any("implausible" in note for note in skipped)
 
@@ -266,7 +335,7 @@ def test_away_suppression_spared_for_a_trip_the_operator_drives_to():
     meeting = FakeMeeting(
         "m1", "Opening Ceremony", (FakeLeg("outbound", HOME_ADDR, VENUE, arrive_by=_dt(20)),)
     )
-    blocks, skipped = meeting_desired_blocks(
+    blocks, skipped, _held = meeting_desired_blocks(
         [meeting],
         route=const_route(234),
         driving_to={"m1": TripPresence(lodging=LODGING, is_first=True, is_last=False)},
@@ -286,7 +355,7 @@ def test_the_drive_back_from_a_mid_trip_event_goes_to_the_lodging_not_home():
     routes = _pair_route(
         {(VENUE, LODGING): timedelta(minutes=13), (VENUE, HOME_ADDR): timedelta(minutes=234)}
     )
-    blocks, _skipped = meeting_desired_blocks(
+    blocks, _skipped, _held = meeting_desired_blocks(
         [meeting],
         route=routes,
         driving_to={"m1": TripPresence(lodging=LODGING, is_first=True, is_last=False)},
@@ -304,7 +373,7 @@ def test_the_drive_back_from_the_last_event_keeps_home():
     routes = _pair_route(
         {(VENUE, LODGING): timedelta(minutes=13), (VENUE, HOME_ADDR): timedelta(minutes=234)}
     )
-    blocks, _skipped = meeting_desired_blocks(
+    blocks, _skipped, _held = meeting_desired_blocks(
         [meeting],
         route=routes,
         driving_to={"m1": TripPresence(lodging=LODGING, is_first=False, is_last=True)},
@@ -317,12 +386,46 @@ def test_the_drive_out_to_a_later_event_starts_from_the_lodging():
     routes = _pair_route(
         {(LODGING, VENUE): timedelta(minutes=13), (HOME_ADDR, VENUE): timedelta(minutes=234)}
     )
-    blocks, _skipped = meeting_desired_blocks(
+    blocks, _skipped, _held = meeting_desired_blocks(
         [meeting],
         route=routes,
         driving_to={"m2": TripPresence(lodging=LODGING, is_first=False, is_last=True)},
     )
     assert [(b.origin, b.destination) for b in blocks] == [(LODGING, VENUE)]
+
+
+def test_a_venue_at_the_lodging_collapses_after_the_presence_rewrite():
+    """Mid-trip, the outbound origin is rewritten home→lodging; a meeting held
+    AT the lodging then reads lodging→lodging and is skipped, not routed."""
+    meeting = FakeMeeting(
+        "m2", "Hotel breakfast talk", (FakeLeg("outbound", HOME_ADDR, LODGING, arrive_by=_dt(8)),)
+    )
+    blocks, skipped, _held = meeting_desired_blocks(
+        [meeting],
+        route=const_route(5),
+        driving_to={"m2": TripPresence(lodging=LODGING, is_first=False, is_last=False)},
+    )
+    assert blocks == []
+    assert skipped == ["meeting m2 outbound: origin is the destination — no drive"]
+
+
+def test_a_venue_at_the_lodging_collapses_despite_formatting_differences():
+    """Copilot on #308: the schedule's lodging is only stripped while the
+    scan's location is whitespace-collapsed; a line break or a case change
+    between the two must still read as the same place."""
+    lodging = "Grand Hotel,\n  1 Main St, Sampleton"
+    meeting = FakeMeeting(
+        "m3",
+        "Hotel breakfast talk",
+        (FakeLeg("outbound", HOME_ADDR, "grand hotel, 1 main st, sampleton", arrive_by=_dt(8)),),
+    )
+    blocks, skipped, _held = meeting_desired_blocks(
+        [meeting],
+        route=const_route(5),
+        driving_to={"m3": TripPresence(lodging=lodging, is_first=False, is_last=False)},
+    )
+    assert blocks == []
+    assert skipped == ["meeting m3 outbound: origin is the destination — no drive"]
 
 
 def test_the_drive_out_to_the_first_event_keeps_home():
@@ -333,7 +436,7 @@ def test_the_drive_out_to_the_first_event_keeps_home():
     routes = _pair_route(
         {(LODGING, VENUE): timedelta(minutes=13), (HOME_ADDR, VENUE): timedelta(minutes=234)}
     )
-    blocks, _skipped = meeting_desired_blocks(
+    blocks, _skipped, _held = meeting_desired_blocks(
         [meeting],
         route=routes,
         driving_to={"m1": TripPresence(lodging=LODGING, is_first=True, is_last=False)},
@@ -353,7 +456,7 @@ def test_a_bridge_leg_keeps_its_prior_venue_origin_on_a_driving_trip():
     routes = _pair_route(
         {("Prior Venue", VENUE): timedelta(minutes=20), (LODGING, VENUE): timedelta(minutes=13)}
     )
-    blocks, _skipped = meeting_desired_blocks(
+    blocks, _skipped, _held = meeting_desired_blocks(
         [meeting],
         route=routes,
         driving_to={"m2": TripPresence(lodging=LODGING, is_first=False, is_last=False)},

@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone, tzinfo
+from datetime import UTC, datetime, tzinfo
 from pathlib import Path
 
 import pytest
@@ -501,6 +501,16 @@ def test_corrupt_json_raises_state_error(state_root: Path):
     state_root.mkdir(parents=True)
     (state_root / CONFIG_FILE).write_text("{not valid json")
     with pytest.raises(StateError, match="not valid JSON"):
+        read_config()
+
+
+def test_non_utf8_state_file_raises_state_error(state_root: Path):
+    """#312: a non-UTF-8 file is present-but-unusable state, so it is a
+    StateError like broken JSON — never a raw UnicodeDecodeError that slips
+    past every caller's StateError handler."""
+    state_root.mkdir(parents=True)
+    (state_root / CONFIG_FILE).write_bytes(b"\xff\xfe{\x00")
+    with pytest.raises(StateError, match="not UTF-8"):
         read_config()
 
 
@@ -1255,7 +1265,7 @@ def test_list_flight_state_ids_skips_non_flight_files(state_root: Path):
 
 # --- resolve_live_origin (the shared origin ladder) ----------------------------
 
-_NOW = datetime(2026, 5, 20, 12, 0, 0, tzinfo=timezone.utc)
+_NOW = datetime(2026, 5, 20, 12, 0, 0, tzinfo=UTC)
 
 
 def _write_location(state_root: Path, captured_at: str) -> None:

@@ -5,7 +5,8 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
-from datetime import datetime, timezone
+import urllib.error
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,6 +21,7 @@ import sync_tripit  # noqa: E402
 from state import (  # noqa: E402
     read_active_flights,
     read_flight_state,
+    read_sync_health,
     write_active_flights,
     write_flight_state,
 )
@@ -65,7 +67,7 @@ def _flight(flight_id: int, code: str = "XX123") -> dict:
 
 def test_first_sync_adds_all_upstream_flights(state_root: Path):
     payload = _trips_payload([_flight(100), _flight(200)])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
         diff = sync_tripit._run_sync(now_utc=fake_now)
@@ -81,7 +83,7 @@ def test_sync_fetches_only_owned_trips(state_root: Path):
     flights never enter the active-flights index and never surface as
     [M] wake events. byAir's list_trips default is "all"."""
     payload = _trips_payload([_flight(100)])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
         sync_tripit._run_sync(now_utc=fake_now)
@@ -104,7 +106,7 @@ def test_sync_bounds_the_byair_client_below_the_precheck_budget(state_root: Path
     pass if the `timeout=` argument is dropped here.
     """
     payload = _trips_payload([_flight(100)])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
         sync_tripit._run_sync(now_utc=fake_now)
@@ -114,12 +116,12 @@ def test_sync_bounds_the_byair_client_below_the_precheck_budget(state_root: Path
 def test_sync_with_unchanged_upstream_no_diff(state_root: Path):
     write_active_flights([100])
     sync_tripit.initialize_flight_from_byair(
-        flight=_flight(100), now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+        flight=_flight(100), now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     )
     payload = _trips_payload([_flight(100)])
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
-        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=timezone.utc))
+        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=UTC))
     assert diff["added"] == []
     assert diff["removed"] == []
 
@@ -133,7 +135,7 @@ def test_sync_repairs_poisoned_marketing_code_on_retained_flight(state_root: Pat
     write_active_flights([100])
     sync_tripit.initialize_flight_from_byair(
         flight=_flight(100, code="9E4908"),
-        now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc),
+        now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC),
     )
     poisoned = must(read_flight_state(100))
     poisoned["last_snapshot"] = {"code": "9E4908", "computed_status": "scheduled"}
@@ -142,7 +144,7 @@ def test_sync_repairs_poisoned_marketing_code_on_retained_flight(state_root: Pat
     payload = _trips_payload([_flight(100, code="DL4908")])
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
-        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=timezone.utc))
+        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=UTC))
 
     assert [e["flight_id"] for e in diff["repaired"]] == [100]
     healed = must(read_flight_state(100))
@@ -156,12 +158,12 @@ def test_sync_does_not_repair_when_code_already_marketing(state_root: Path):
     write_active_flights([100])
     sync_tripit.initialize_flight_from_byair(
         flight=_flight(100, code="DL4908"),
-        now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc),
+        now_utc=datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC),
     )
     payload = _trips_payload([_flight(100, code="DL4908")])
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
         mock_byair.return_value.list_trips.return_value = payload
-        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=timezone.utc))
+        diff = sync_tripit._run_sync(now_utc=datetime(2026, 5, 18, 4, 5, 0, tzinfo=UTC))
 
     assert diff["repaired"] == []
     assert must(read_flight_state(100))["code"] == "DL4908"
@@ -170,7 +172,7 @@ def test_sync_does_not_repair_when_code_already_marketing(state_root: Path):
 def test_sync_removes_expired_flights(state_root: Path):
     # Initial state: tracking 100 and 200
     write_active_flights([100, 200])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(100), now_utc=fake_now)
     sync_tripit.initialize_flight_from_byair(flight=_flight(200), now_utc=fake_now)
     # Upstream now only reports 100
@@ -206,7 +208,7 @@ def test_sync_retains_removed_flight_with_calendar_ledger_as_tombstone(state_roo
     reconcile sweep needs the ledger to delete those events. It still leaves
     active-flights and still surfaces in the removed-event payload."""
     write_active_flights([100, 200])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(100), now_utc=fake_now)
     sync_tripit.initialize_flight_from_byair(flight=_flight(200), now_utc=fake_now)
     # Flight 200 has carried a calendar ledger forward.
@@ -232,7 +234,7 @@ def test_sync_deletes_removed_flight_without_ledger(state_root: Path):
     ledger. A removed flight with nothing to tear down is deleted immediately,
     preserving the prior behavior."""
     write_active_flights([100, 200])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(100), now_utc=fake_now)
     sync_tripit.initialize_flight_from_byair(flight=_flight(200), now_utc=fake_now)
 
@@ -246,7 +248,7 @@ def test_sync_deletes_removed_flight_without_ledger(state_root: Path):
 
 def test_sync_adds_and_removes_in_one_pass(state_root: Path):
     write_active_flights([100])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(100), now_utc=fake_now)
     payload = _trips_payload([_flight(200), _flight(300)])
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
@@ -259,7 +261,7 @@ def test_sync_adds_and_removes_in_one_pass(state_root: Path):
 
 def test_sync_handles_empty_upstream(state_root: Path):
     write_active_flights([100, 200])
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(100), now_utc=fake_now)
     sync_tripit.initialize_flight_from_byair(flight=_flight(200), now_utc=fake_now)
     with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
@@ -271,7 +273,7 @@ def test_sync_handles_empty_upstream(state_root: Path):
 
 def test_initialize_flight_with_flight_id_key(state_root: Path):
     """initialize_flight_from_byair tolerates `flight_id` instead of `id`."""
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     flight = {
         "flight_id": 42,  # precheck's internal key, not byair's `id`
         "code": "XX42",
@@ -290,7 +292,7 @@ def test_initialize_flight_with_flight_id_key(state_root: Path):
 
 def test_initialize_flight_with_id_key(state_root: Path):
     """initialize_flight_from_byair also tolerates `id` (byair raw shape)."""
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight=_flight(42), now_utc=fake_now)
     state = read_flight_state(42)
     assert state is not None
@@ -299,14 +301,14 @@ def test_initialize_flight_with_id_key(state_root: Path):
 
 def test_initialize_flight_with_no_id_is_a_no_op(state_root: Path):
     """A flight dict without either id or flight_id silently no-ops."""
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     sync_tripit.initialize_flight_from_byair(flight={"code": "XX"}, now_utc=fake_now)
     assert read_active_flights() == []  # nothing written
 
 
 def test_sync_handles_multi_trip_payload(state_root: Path):
     """Each trip's flights all roll into the same active-flights index."""
-    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=timezone.utc)
+    fake_now = datetime(2026, 5, 18, 4, 0, 0, tzinfo=UTC)
     payload = {
         "trips": [
             {"id": 1, "name": "T1", "flights": [_flight(100)]},
@@ -320,6 +322,290 @@ def test_sync_handles_multi_trip_payload(state_root: Path):
     assert must(read_flight_state(100))["trip_id"] == 1
     assert must(read_flight_state(200))["trip_id"] == 2
     assert must(read_flight_state(300))["trip_id"] == 2
+
+
+# ---------------------------------------------------------------------------
+# byAir health counter (#326)
+# ---------------------------------------------------------------------------
+
+
+def _main_payload(capsys, *, list_trips_side_effect=None, list_trips_return=None) -> dict:
+    with patch("sync_tripit.ByAirClient.from_env") as mock_byair:
+        if list_trips_side_effect is not None:
+            mock_byair.return_value.list_trips.side_effect = list_trips_side_effect
+        else:
+            mock_byair.return_value.list_trips.return_value = list_trips_return
+        assert sync_tripit.main() == 0
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def _source_events(payload: dict) -> list[dict]:
+    return [e["event"] for e in payload["data"]["events"] if e["flight_id"] is None]
+
+
+def test_outage_alert_fires_once_at_threshold(state_root: Path, capsys):
+    """Failed passes stay quiet until the threshold, alert exactly once, and
+    do not re-alert while the same failure run continues."""
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    payloads = [
+        _main_payload(capsys, list_trips_side_effect=failure)
+        for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD + 1)
+    ]
+    for quiet in payloads[: sync_tripit._OUTAGE_ALERT_THRESHOLD - 1]:
+        assert quiet["wake_agent"] is False
+        assert _source_events(quiet) == []
+    alert = payloads[sync_tripit._OUTAGE_ALERT_THRESHOLD - 1]
+    assert alert["wake_agent"] is True
+    assert _source_events(alert) == [
+        {
+            "reason": "byair_unreachable",
+            "consecutive_failures": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+            "error": "session_missing",
+        }
+    ]
+    assert payloads[-1]["wake_agent"] is False
+    assert _source_events(payloads[-1]) == []
+
+
+def test_an_alert_that_never_reached_stdout_is_sent_again(state_root: Path, capsys):
+    """#327 review: `alerted` means the alert went out. A pass whose emission
+    fails must leave the health record untouched, so the next pass re-sends."""
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD - 1):
+        _main_payload(capsys, list_trips_side_effect=failure)
+    before = read_sync_health()
+    with (
+        patch("sync_tripit.ByAirClient.from_env") as mock_byair,
+        patch("sync_tripit._emit_diff", side_effect=BrokenPipeError("stdout closed")),
+    ):
+        mock_byair.return_value.list_trips.side_effect = failure
+        with pytest.raises(BrokenPipeError):
+            sync_tripit.main()
+    capsys.readouterr()
+    assert read_sync_health() == before
+    again = _main_payload(capsys, list_trips_side_effect=failure)
+    assert [e["reason"] for e in _source_events(again)] == ["byair_unreachable"]
+
+
+def test_recovery_after_alert_emits_recovered_and_resets(state_root: Path, capsys):
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD):
+        _main_payload(capsys, list_trips_side_effect=failure)
+    recovered = _main_payload(capsys, list_trips_return={"trips": []})
+    assert recovered["wake_agent"] is True
+    assert _source_events(recovered) == [
+        {
+            "reason": "byair_recovered",
+            "failures_before_recovery": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+        }
+    ]
+    # The run is over: the next failures start counting from zero again.
+    after = _main_payload(capsys, list_trips_side_effect=failure)
+    assert _source_events(after) == []
+
+
+def test_clean_pass_below_threshold_resets_silently(state_root: Path, capsys):
+    failure = urllib.error.URLError("synthetic network failure")
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD - 1):
+        _main_payload(capsys, list_trips_side_effect=failure)
+    clean = _main_payload(capsys, list_trips_return={"trips": []})
+    assert _source_events(clean) == []
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD - 1):
+        quiet = _main_payload(capsys, list_trips_side_effect=failure)
+        assert _source_events(quiet) == []
+
+
+def _internal_failure_payload(capsys) -> dict:
+    with patch("sync_tripit.ByAirClient.from_env", side_effect=ValueError("unset")):
+        assert sync_tripit.main() == 0
+    return json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+
+
+def test_unexpected_health_defect_still_emits_safe_shape(state_root: Path, capsys):
+    """#327 review: a defect in the health bookkeeping inside the outer
+    handler must not escape it — the scheduler reads a non-zero exit or
+    invalid stdout as a silent skip."""
+    with (
+        patch("sync_tripit.ByAirClient.from_env", side_effect=ValueError("unset")),
+        patch("sync_tripit._plan_sync_health", side_effect=KeyError("count")),
+    ):
+        assert sync_tripit.main() == 0
+    payload = json.loads(capsys.readouterr().out.strip().splitlines()[-1])
+    assert payload["wake_agent"] is False
+    assert payload["data"]["error"] == "sync_exception"
+    assert payload["data"]["health_error"] == "KeyError"
+
+
+def test_local_fault_alerts_as_internal_not_byair(state_root: Path, capsys):
+    """An exception escaping the sync (e.g. BYAIR_MCP_URL unset) is a local
+    fault: it runs its own counter and never reads as a byAir outage."""
+    payloads = [
+        _internal_failure_payload(capsys) for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD)
+    ]
+    assert payloads[-1]["data"]["error"] == "sync_exception"
+    assert _source_events(payloads[-1]) == [
+        {
+            "reason": "sync_internal_error",
+            "consecutive_failures": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+            "error": "ValueError",
+        }
+    ]
+    recovered = _main_payload(capsys, list_trips_return={"trips": []})
+    assert _source_events(recovered) == [
+        {
+            "reason": "sync_internal_recovered",
+            "failures_before_recovery": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+        }
+    ]
+
+
+def test_local_fault_leaves_the_byair_run_untouched(state_root: Path, capsys):
+    """byAir was never asked on a local fault, so its run neither resets nor
+    advances: two byAir failures, a local fault, then a third byAir failure
+    still alerts."""
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD - 1):
+        _main_payload(capsys, list_trips_side_effect=failure)
+    assert _source_events(_internal_failure_payload(capsys)) == []
+    alert = _main_payload(capsys, list_trips_side_effect=failure)
+    assert _source_events(alert) == [
+        {
+            "reason": "byair_unreachable",
+            "consecutive_failures": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+            "error": "session_missing",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "trips_payload",
+    [
+        [],
+        {},
+        {"trips": None},
+        {"trips": "nope"},
+        {"trips": [["not", "a", "trip"]]},
+        {"trips": [{"id": 1}]},
+        {"trips": [{"flights": [7]}]},
+        {"trips": [{"flights": [{"code": "XX1"}]}]},
+    ],
+    ids=[
+        "list",
+        "trips-missing",
+        "trips-null",
+        "trips-not-list",
+        "trip-not-object",
+        "flights-missing",
+        "flight-not-object",
+        "flight-id-missing",
+    ],
+)
+def test_malformed_list_trips_counts_as_byair_failure(state_root: Path, capsys, trips_payload):
+    """#327 review: byAir answering in the wrong shape is a byAir failure,
+    so it advances byair_unreachable, not the internal run, and never reads
+    as "no flights" (which would untrack every active flight)."""
+    write_active_flights([100])
+    payloads = [
+        _main_payload(capsys, list_trips_return=trips_payload)
+        for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD)
+    ]
+    assert payloads[-1]["data"]["error"] == "malformed_response"
+    assert _source_events(payloads[-1]) == [
+        {
+            "reason": "byair_unreachable",
+            "consecutive_failures": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+            "error": "malformed_response",
+        }
+    ]
+    assert read_active_flights() == [100]
+
+
+def test_internal_recovery_then_byair_failure_reports_both_runs(state_root: Path, capsys):
+    """#327 review: clearing the local fault says nothing about byAir. A pass
+    that completes locally but fails at byAir emits sync_internal_recovered
+    and still advances the byAir run."""
+    for _ in range(sync_tripit._OUTAGE_ALERT_THRESHOLD):
+        _internal_failure_payload(capsys)
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    payload = _main_payload(capsys, list_trips_side_effect=failure)
+    assert payload["data"]["error"] == "session_missing"
+    assert _source_events(payload) == [
+        {
+            "reason": "sync_internal_recovered",
+            "failures_before_recovery": sync_tripit._OUTAGE_ALERT_THRESHOLD,
+        }
+    ]
+    record = json.loads((state_root / "sync-health.json").read_text(encoding="utf-8"))
+    assert record["consecutive_failures"] == 1
+    assert record["internal_failures"] == 0
+
+
+def _health_record(**overrides) -> dict:
+    record = {
+        "schema_version": 1,
+        "consecutive_failures": 1,
+        "alerted": False,
+        "last_error": "transport_error",
+        "internal_failures": 0,
+        "internal_alerted": False,
+        "last_internal_error": None,
+    }
+    record.update(overrides)
+    return record
+
+
+_MISSING_LAST_ERROR = _health_record()
+del _MISSING_LAST_ERROR["last_error"]
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        "{not json",
+        json.dumps(_health_record(schema_version=2)),
+        json.dumps(_health_record(schema_version=True)),
+        json.dumps(_health_record(schema_version=1.0)),
+        # Valid types but no last_error key (Copilot on #327).
+        json.dumps(_MISSING_LAST_ERROR),
+    ],
+    ids=["unparseable", "newer-schema", "bool-schema", "float-schema", "missing-last-error"],
+)
+def test_unusable_health_file_is_reported_not_reset(state_root: Path, capsys, content: str):
+    """An unusable record is never silently zeroed: the pass reports
+    `health_error`, leaves the file as found, and still emits its payload."""
+    state_root.mkdir(parents=True)
+    health = state_root / "sync-health.json"
+    health.write_text(content, encoding="utf-8")
+    failure = sync_tripit.ByAirError("session_missing", "no mcp-session-id")
+    payload = _main_payload(capsys, list_trips_side_effect=failure)
+    assert payload["data"]["error"] == "session_missing"
+    assert payload["data"]["health_error"] == "StateError"
+    assert _source_events(payload) == []
+    assert health.read_text(encoding="utf-8") == content
+
+
+def test_health_write_failure_keeps_the_sync_diff(state_root: Path, capsys):
+    """The index already holds this pass's changes, so a failed health write
+    must not cost the payload its tracked_flight_added event."""
+    state_root.mkdir(parents=True)
+    # A prior failure makes the clean pass below try to reset the counter.
+    (state_root / "sync-health.json").write_text(json.dumps(_health_record()), encoding="utf-8")
+    with (
+        patch("sync_tripit.write_sync_health", side_effect=OSError("disk full")),
+        patch("sync_tripit.ByAirClient.from_env") as mock_byair,
+    ):
+        mock_byair.return_value.list_trips.return_value = _trips_payload([_flight(100)])
+        assert sync_tripit.main() == 0
+    out, err = capsys.readouterr()
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert payload["wake_agent"] is True
+    assert [e["event"]["reason"] for e in payload["data"]["events"]] == ["tracked_flight_added"]
+    # The write runs after emission, so its failure goes to stderr; the
+    # unchanged record makes the next pass derive the same events.
+    assert "not updated (disk full)" in err
+    on_disk = json.loads((state_root / "sync-health.json").read_text(encoding="utf-8"))
+    assert on_disk == _health_record()
+    assert read_active_flights() == [100]
 
 
 # ---------------------------------------------------------------------------
@@ -349,3 +635,19 @@ def test_script_emits_safe_shape_when_byair_unset(tmp_path: Path):
     assert payload["wake_agent"] is False
     # Error context is in stderr; stdout stays a safe shape
     assert payload["data"].get("error") == "sync_exception"
+
+
+@pytest.mark.parametrize(
+    "override",
+    [{"alerted": 1}, {"internal_alerted": "yes"}, {"last_error": 5}, {"last_internal_error": []}],
+    ids=["alerted-int", "internal-alerted-str", "last-error-int", "last-internal-error-list"],
+)
+def test_writer_rejects_values_its_reader_would_refuse(state_root: Path, override: dict):
+    """#327 review: the writer enforces the same field types the reader
+    validates, so it can never persist a record the next run rejects."""
+    from state import write_sync_health
+
+    record = {k: v for k, v in _health_record(**override).items() if k != "schema_version"}
+    with pytest.raises(ValueError):
+        write_sync_health(record)
+    assert not (state_root / "sync-health.json").exists()

@@ -11,7 +11,7 @@ treated as done.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +24,7 @@ from calendar_apply import ApplyResult, apply_plan, build_create_args  # noqa: E
 from google_calendar_client import GoogleCalendarError  # noqa: E402
 from reconcile import Convert, Create, Delete, DesiredBlock, ReconcilePlan, Update  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _dt(h, mi=0):
@@ -187,6 +187,34 @@ def test_create_builds_one_event():
     comp = FakeCalendar()
     result = apply_plan(plan, calendar=comp, calendar_id="primary")
     assert result.created == 1 and len(comp.created) == 1
+
+
+def test_create_renders_the_notice_time_and_body_in_the_block_zone():
+    """#301: the ExamOne block. Anchor 13:00Z on a block carrying the operator's
+    zone reads "08:00" (CDT) in the notice material and the create body, not the
+    15:00 the source event's stale +02:00 offset would have shown."""
+    desired = DesiredBlock(
+        identity="exam1",
+        kind="meeting_outbound",
+        summary="Drive: ExamOne Appointment",
+        start=datetime(2026, 9, 11, 12, 22, tzinfo=UTC),
+        end=datetime(2026, 9, 11, 13, 0, tzinfo=UTC),
+        origin="Home",
+        destination="Clinic",
+        baseline_seconds=2280,
+        anchor=datetime(2026, 9, 11, 13, 0, tzinfo=UTC),
+        timezone="America/Chicago",
+    )
+    cal = FakeCalendar()
+    result = apply_plan(ReconcilePlan(creates=(Create(desired),)), calendar=cal)
+    assert result.created == 1
+    [leg] = result.added_meeting_legs
+    assert leg["meeting"] == "ExamOne Appointment"
+    assert leg["when"] == "Fri Sep 11, 08:00"
+    [body] = cal.created
+    assert body["start"]["timeZone"] == "America/Chicago"
+    assert body["start"]["dateTime"] == "2026-09-11T07:22:00-05:00"
+    assert body["end"]["dateTime"] == "2026-09-11T08:00:00-05:00"
 
 
 def test_convert_creates_new_and_deletes_all_legacy():

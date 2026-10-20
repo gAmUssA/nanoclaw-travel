@@ -8,7 +8,7 @@ past/future boundary is unambiguous.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -27,7 +27,7 @@ from disposition import DispositionError, resolve_disposition  # noqa: E402
 
 # Fixed wall clock for every case. Flights scheduled before this are past,
 # after it are future.
-NOW = datetime(2026, 5, 17, 18, 0, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 5, 17, 18, 0, 0, tzinfo=UTC)
 
 FUTURE_ARR = "2026-05-17T22:00:00+00:00"  # 4h after NOW
 PAST_ARR = "2026-05-17T14:00:00+00:00"  # 4h before NOW

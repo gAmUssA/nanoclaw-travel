@@ -18,13 +18,13 @@ Fixtures are the DESCRIPTION bodies TripIt actually emits, escapes included
 raw field rather than a pre-cleaned copy.
 """
 
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 
 def _utc(year, month, day, hour, minute=0):
-    return datetime(year, month, day, hour, minute, tzinfo=timezone.utc)
+    return datetime(year, month, day, hour, minute, tzinfo=UTC)
 
 
 # The red-eye that started this: 11:05 PM PDT on Aug 22 is an Aug 23 UTC

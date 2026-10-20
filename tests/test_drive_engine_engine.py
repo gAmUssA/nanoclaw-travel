@@ -13,7 +13,7 @@ and unroutable legs are suppressed/skipped.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +24,7 @@ from block_codec import GEN_LEGACY_FADRIVE, GEN_UNIFIED, ParsedBlock  # noqa: E4
 from engine import AirportInfo, build_reconcile_plan  # noqa: E402
 from flight_identity import BYAIR, TRIPIT, Flight  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 HOME = "12 Example St, TN"
 NOW = datetime(2020, 7, 10, 12, 0, tzinfo=UTC)  # well before the trip → plan wins
 US = "🇺🇸"
@@ -596,3 +596,68 @@ def test_a_trip_driven_to_then_flown_out_of_does_not_drive_home_to_tennessee():
     arrivals = [c.desired for c in result.plan.creates if c.desired.kind == "airport_arrival"]
     assert arrivals[-1].destination != HOME
     assert "Gatlinburg" in arrivals[-1].destination
+
+
+def test_airport_arrival_on_home_metro_placeholder_returns_home():
+    f = flight("JFK", "BNA", _dt(9), _dt(11), fid=1)
+    result = build_reconcile_plan(
+        flights=[f],
+        airport_info=_us_info("JFK", "BNA"),
+        current_blocks=[],
+        route=const_route(40),
+        home_address=HOME,
+        home_metros=frozenset({"nashville, tn"}),
+        now=NOW,
+        schedule=[
+            {
+                "type": "Trip",
+                "summary": "Local placeholder",
+                "start": "2020-07-12",
+                "end": "2020-07-12",
+                "location": "Nashville, TN",
+            }
+        ],
+    )
+    arrival = next(c.desired for c in result.plan.creates if c.desired.kind == "airport_arrival")
+    assert arrival.destination == HOME
+    assert arrival.baseline_seconds == 2400
+
+
+def test_an_implausibly_long_airport_drive_writes_no_block():
+    """#323: a 16.8 h "drive" to a departure airport means the origin resolved
+    to the wrong city; it is reported, never written."""
+    result = build_reconcile_plan(
+        flights=_staged_round_trip_chain(),
+        airport_info=_us_info("BNA", "SFO"),
+        current_blocks=[],
+        route=const_route(16 * 60 + 49),
+        schedule=_staged_round_trip_schedule(),
+        home_address=HOME,
+        now=NOW,
+    )
+    kinds = {c.desired.kind for c in result.plan.creates}
+    assert "airport_departure" not in kinds and "airport_arrival" not in kinds
+    assert any("implausible 16.8 h drive" in reason for reason in result.skipped)
+
+
+def test_an_implausibly_long_airport_transfer_writes_no_block():
+    """#331 review: the six-hour cap covers different-airport transfers too."""
+    chain = [
+        flight("BNA", "LHR", _dt(9), _dt(15), fid=1, trip_id=9),
+        flight("LGW", "JFK", _dt(20), _dt(23), fid=2, trip_id=9),
+    ]
+
+    def route(origin, dest):
+        hours = 7 if {origin, dest} == {"LHR airport", "LGW airport"} else 0.5
+        return timedelta(hours=hours)
+
+    result = build_reconcile_plan(
+        flights=chain,
+        airport_info=_us_info("BNA", "LHR", "LGW", "JFK"),
+        current_blocks=[],
+        route=route,
+        home_address=HOME,
+        now=NOW,
+    )
+    assert all(c.desired.kind != "airport_transfer" for c in result.plan.creates)
+    assert any(r.startswith("transfer ") and "implausible 7.0 h" in r for r in result.skipped)

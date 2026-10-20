@@ -9,7 +9,7 @@ threading.
 from __future__ import annotations
 
 import sys
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -24,7 +24,7 @@ from chain_builder import (  # noqa: E402
 )
 from flight_identity import MergedFlight  # noqa: E402
 
-UTC = timezone.utc
+UTC = UTC
 
 
 def _dt(h, mi=0, *, day=12):
