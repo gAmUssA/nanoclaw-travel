@@ -682,17 +682,20 @@ def _resolve_one_airport(
         if static is not None:
             return _resolved_from_static(static), None
         raise AirportUnresolved("no usable IATA resolving a first-seen airport")
+    lat, lon = ctx.lat, ctx.lon
+    if (lat is None or lon is None) and static is not None and static.iata == ctx.code:
+        # A refresh without a full coordinate pair keeps the cached one for the
+        # same airport rather than downgrading it to routing by name.
+        lat, lon = static.lat, static.lon
     resolved = ResolvedAirport(
         iata=ctx.code,
         flag=ctx.flag,
         delay_index=ctx.delay_index if want_delay else None,
         timezone=ctx.timezone,
-        lat=ctx.lat,
-        lon=ctx.lon,
+        lat=lat,
+        lon=lon,
     )
-    fresh = StaticAirport(
-        iata=ctx.code, flag=ctx.flag, timezone=ctx.timezone, lat=ctx.lat, lon=ctx.lon
-    )
+    fresh = StaticAirport(iata=ctx.code, flag=ctx.flag, timezone=ctx.timezone, lat=lat, lon=lon)
     new_static = fresh if static != fresh else None
     return resolved, new_static
 

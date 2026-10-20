@@ -1020,3 +1020,15 @@ def test_a_held_trip_keeps_the_local_drive_its_outbound_absorbed(tmp_path, monke
     )
     assert kept == []
     assert ("mtg-1", "meeting_outbound") in {leg.key for leg in held}
+
+
+def test_resolve_a_refresh_without_coordinates_keeps_the_cached_pair():
+    """#336 review: a near-term delay refresh missing lat/lon must not downgrade
+    a cached routing point to routing by name."""
+    static = StaticAirport(iata="BNA", flag="🇺🇸", timezone="America/Chicago", lat=36.12, lon=-86.68)
+    fetched = _FakeCtx("BNA", flag="🇺🇸", delay_index="high", timezone="America/Chicago")
+    resolved, new_static = _resolve_one_airport(
+        static=static, want_delay=True, fetch=lambda: fetched
+    )
+    assert (resolved.lat, resolved.lon, resolved.delay_index) == (36.12, -86.68, "high")
+    assert new_static is None  # nothing changed worth persisting
