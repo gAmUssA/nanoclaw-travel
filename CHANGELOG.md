@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.10 — 2026-11-15
+
+- chore: refresh the Tessl-generated ignore block (#390)
+
 ## 0.3.9 — 2026-11-15
 
 - fix(flight-assist): treat socket timeouts like URLError (#388)
