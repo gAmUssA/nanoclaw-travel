@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.9 — 2026-11-15
+
+- fix(flight-assist): treat socket timeouts like URLError (#388)
+
 ## 0.3.8 — 2026-11-12
 
 - feat(drive-engine): arrive at a talk's Prep hold, not its start (#381) (#382)
