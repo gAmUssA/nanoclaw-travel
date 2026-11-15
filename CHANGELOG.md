@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.11 — 2026-11-15
+
+- feat: implement the architecture plan (#389)
+
 ## 0.3.10 — 2026-11-15
 
 - chore: refresh the Tessl-generated ignore block (#390)
