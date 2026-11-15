@@ -2424,6 +2424,43 @@ def _run_leave_by_cycle(now, *, gps=None, airport=_BNA_AIRPORT, monkeypatch, sta
     return events, client.return_value
 
 
+@pytest.mark.parametrize("timeout_stage", ["open", "read"])
+@pytest.mark.parametrize("with_backup", [False, True])
+def test_maps_timeouts_defer_time_to_leave(
+    state_root: Path, monkeypatch, capsys, timeout_stage, with_backup
+):
+    _seed_leave_by_flight()
+    monkeypatch.setattr(precheck, "resolve_effective_home", lambda address, **kwargs: address)
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test")
+    if with_backup:
+        monkeypatch.setenv("TOMTOM_API_KEY", "test")
+    else:
+        monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
+    timeout = TimeoutError("maps timed out")
+    response = MagicMock()
+    response.__enter__.return_value.read.side_effect = timeout
+    with (
+        patch("precheck.ByAirClient.from_env") as byair,
+        patch(
+            "urllib.request.urlopen",
+            side_effect=timeout if timeout_stage == "open" else None,
+            return_value=response,
+        ) as urlopen,
+    ):
+        byair.return_value.get_flight.return_value = _bna_flight()
+        byair.return_value.get_airport.return_value = _BNA_AIRPORT
+        events = precheck._run_cycle(now_utc=datetime(2026, 5, 18, 16, 0, tzinfo=UTC))
+
+    assert urlopen.call_count == (2 if with_backup else 1)
+    assert all(event["event"]["reason"] != "time_to_leave" for event in events)
+    state = must(read_flight_state(12345))
+    assert state["phase_markers"]["time_to_leave_fired"] is False
+    error = capsys.readouterr().err
+    assert "maps timed out" in error
+    if with_backup:
+        assert "ALL_PROVIDERS_FAILED" in error
+
+
 def test_process_flight_fresh_gps_at_airport_stays_silent(state_root: Path, monkeypatch):
     """Fresh GPS at BNA + documented get_airport coords → no time_to_leave."""
     _seed_leave_by_flight()

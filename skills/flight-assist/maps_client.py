@@ -97,14 +97,17 @@ class TravelTime:
 
 
 def _get_json(url: str, timeout: float) -> dict:
-    """GET a URL and decode the JSON body. Transport errors propagate."""
+    """GET and decode JSON, normalizing transport timeouts to URLError."""
     request = urllib.request.Request(
         url,
         headers={"Accept": "application/json"},
         method="GET",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
-        return json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except TimeoutError as exc:
+        raise urllib.error.URLError(exc) from exc
 
 
 def _traffic_factor(duration: int, in_traffic: int | None) -> float:
