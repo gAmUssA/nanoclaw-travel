@@ -15,7 +15,10 @@ Phrase every relative-date word in a flight-assist surface against the operator'
 ## Resolve the operator's local date
 
 - Run the core `current-tz` reader, `skills/current-tz/scripts/read-current-tz.py` in `jbaruch/nanoclaw-core` (installed in every tier; the flight-assist step carries the runtime path). It emits `{"available": true, "tz": "<iana>", "local_now": "<ISO-8601>", "local_date": "YYYY-MM-DD"}` or the all-null `available: false` shape
-- On `available: true`: `local_date` is the operator's date now. Run the reader with no arguments; its `--now` seam is test-only (core rules/temporal-awareness.md:48-50). The precheck converts each departure to the operator's date by passing the reader's `tz` to `phase_markers.day_label` (core current-tz SKILL.md Step 2: pass `tz` to a script that converts another instant)
+- On `available: true`: `local_date` is the operator's date now
+- Run the reader with no arguments in production
+- Keep the reader's `--now` seam test-only (core rules/temporal-awareness.md:48-50)
+- The precheck converts each departure to the operator's date by passing the reader's `tz` to `phase_markers.day_label` (core current-tz SKILL.md Step 2)
 - Never derive a relative date from container-local `datetime.now()`
 - Never convert an instant by hand
 - A `day_before` event carries `day_label`, resolved by the precheck through the same reader; render it, never re-derive it

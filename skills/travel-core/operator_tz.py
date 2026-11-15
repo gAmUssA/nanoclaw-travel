@@ -29,7 +29,6 @@ Public API:
     from operator_tz import CORE_READER_PATH, OperatorTz, read_operator_tz
 
     zone = read_operator_tz()                      # OperatorTz | None
-    zone = read_operator_tz(now=some_instant)      # local fields at that instant
     zone.tz, zone.local_now, zone.local_date
 """
 
@@ -111,10 +110,9 @@ def read_operator_tz(
 ) -> OperatorTz | None:
     """Return the operator's current zone, or None when no usable zone came back.
 
-    `now` pins the instant `local_now` / `local_date` describe (passed to the
-    reader as `--now`); it must be timezone-aware, matching the reader's own
-    rule. `reader` and `run` are injection points for tests; production callers
-    take the defaults.
+    `now`, `reader` and `run` are test-only injection points; production callers
+    take the defaults. In tests, `now` pins the instant `local_now` / `local_date`
+    describe (passed to the reader as `--now`) and must be timezone-aware.
     """
     if now is not None and (now.tzinfo is None or now.utcoffset() is None):
         # `tzinfo` alone is not awareness: a tzinfo whose `utcoffset()` is None
