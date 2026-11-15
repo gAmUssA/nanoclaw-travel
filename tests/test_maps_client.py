@@ -13,7 +13,7 @@ import sys
 import urllib.error
 import urllib.parse
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -428,6 +428,61 @@ def test_fallback_to_tomtom_when_google_transport_fails():
     with patch("urllib.request.urlopen", side_effect=fake):
         result = maps.travel_time(origin="home", destination="BNA airport")
     assert result.source == "tomtom"
+
+
+@pytest.fixture(params=["open", "read"])
+def timeout_result(request):
+    timeout = TimeoutError("maps timed out")
+    if request.param == "open":
+        return timeout
+    response = MagicMock()
+    response.__enter__.return_value.read.side_effect = timeout
+    return response
+
+
+def test_google_timeout_uses_healthy_backup(timeout_result):
+    maps = MapsClient(SYNTH_KEY, tomtom=TomTomClient(SYNTH_TOMTOM_KEY))
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=[
+            timeout_result,
+            _tomtom_geocode_response(),
+            _tomtom_geocode_response(),
+            _tomtom_route_response(),
+        ],
+    ):
+        result = maps.travel_time(origin="home", destination="BNA")
+
+    assert result.source == "tomtom"
+    assert result.in_traffic_seconds == 2400
+
+
+@pytest.mark.parametrize("backup_call", [0, 1, 2], ids=["origin", "destination", "route"])
+def test_tomtom_timeout_combines_both_provider_failures(timeout_result, backup_call):
+    maps = MapsClient(SYNTH_KEY, tomtom=TomTomClient(SYNTH_TOMTOM_KEY))
+    responses = [_tomtom_geocode_response() for _ in range(backup_call)]
+    with patch(
+        "urllib.request.urlopen",
+        side_effect=[_error_response("REQUEST_DENIED"), *responses, timeout_result],
+    ):
+        with pytest.raises(MapsError) as exc_info:
+            maps.travel_time(origin="home", destination="BNA")
+
+    assert exc_info.value.status == "ALL_PROVIDERS_FAILED"
+    assert "Google failed (REQUEST_DENIED" in str(exc_info.value)
+    assert "TomTom backup failed (<urlopen error maps timed out>)" in str(exc_info.value)
+    transport_error = exc_info.value.__cause__
+    assert isinstance(transport_error, urllib.error.URLError)
+    assert isinstance(transport_error.reason, TimeoutError)
+
+
+def test_google_timeout_without_backup_is_url_error(client, timeout_result):
+    with patch("urllib.request.urlopen", side_effect=[timeout_result]):
+        with pytest.raises(urllib.error.URLError) as exc_info:
+            client.travel_time(origin="home", destination="BNA")
+
+    assert isinstance(exc_info.value.reason, TimeoutError)
+    assert exc_info.value.__cause__ is exc_info.value.reason
 
 
 def test_both_providers_fail_raises_combined_error():
