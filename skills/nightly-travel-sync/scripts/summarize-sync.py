@@ -80,8 +80,8 @@ def validate_success(result: dict[str, Any]) -> None:
         raise ValueError("successful sync output has invalid field types")
     for item in result["segments"]:
         row = text_record(item, ("timezone", "from", "to", "label"))
-        if day(row["from"]) >= day(row["to"]):
-            raise ValueError("segment date bounds must have a positive exclusive interval")
+        start_day, end_day = day(row["from"]), day(row["to"])
+        instants: dict[str, datetime] = {}
         for key in ("from_dt", "to_dt"):
             if key not in row or (row[key] is not None and not isinstance(row[key], str)):
                 raise ValueError("segment instants must be ISO-8601 strings or null")
@@ -92,6 +92,12 @@ def validate_success(result: dict[str, Any]) -> None:
                     raise ValueError("segment instants must be valid ISO-8601 strings") from None
                 if parsed.tzinfo is None:
                     raise ValueError("segment instants must include a timezone offset")
+                instants[key] = parsed
+        if len(instants) == 2:
+            if instants["from_dt"] >= instants["to_dt"]:
+                raise ValueError("segment instants must have a positive interval")
+        elif start_day >= end_day:
+            raise ValueError("segment date bounds must have a positive exclusive interval")
     for item in result["conflicts"]:
         row = text_record(item, ("trip1", "trip2", "overlap"))
         day(row["overlap"])

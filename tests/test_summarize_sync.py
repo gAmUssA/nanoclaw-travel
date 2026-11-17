@@ -329,3 +329,24 @@ def test_cli_rejects_invalid_nonnull_home_zone_without_emitting_a_report(zone, m
     assert output.out == ""
     assert "valid IANA timezone or null" in output.err
     assert "Inspect the sync JSON" in output.err
+
+
+def test_positive_subday_segment_keeps_same_day_bounds():
+    payload = successful_payload()
+    payload["segments"][0].update(
+        {
+            "from": "2024-06-08",
+            "to": "2024-06-08",
+            "from_dt": "2024-06-08T09:00:00Z",
+            "to_dt": "2024-06-08T17:00:00Z",
+        }
+    )
+    module.validate_success(payload)
+
+
+@pytest.mark.parametrize("end", ["2024-06-08T09:00:00Z", "2024-06-08T08:00:00Z"])
+def test_nonpositive_instant_interval_is_refused(end):
+    payload = successful_payload()
+    payload["segments"][0].update({"from_dt": "2024-06-08T09:00:00Z", "to_dt": end})
+    with pytest.raises(ValueError, match="positive interval"):
+        module.validate_success(payload)
