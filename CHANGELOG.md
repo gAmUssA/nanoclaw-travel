@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.3.12 — 2026-11-17
+
+- Update dependency ruff to v0.17.5 (#383)
+
 ## 0.3.11 — 2026-11-15
 
 - feat: implement the architecture plan (#389)
