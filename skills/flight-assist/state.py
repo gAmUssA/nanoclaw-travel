@@ -5,11 +5,11 @@ deltas between byAir snapshots. State lives under
 `/workspace/state/flight-assist/` in production; tests override the
 directory via the `FLIGHT_ASSIST_STATE_DIR` environment variable.
 
-Files written (all JSON, all carry `schema_version: 7` at the top level):
+Files written (all JSON with their own top-level schema_version):
 
-    config.json                       — home_address, etc. (set via /setup)
-    active-flights.json               — list of currently-tracked flight_ids
-    flight-<flight_id>.json           — per-flight state record
+    config.json                       — schema 9, home/venue/EV preferences
+    active-flights.json               — schema 8, currently-tracked flight_ids
+    flight-<flight_id>.json           — schema 8, per-flight state record
 
     sync-health.json                  — consecutive sync failures, byAir
                                         and internal (own `schema_version: 1`,
@@ -61,10 +61,13 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-STATE_SCHEMA_VERSION = 7
+STATE_SCHEMA_VERSION = 8
+CONFIG_SCHEMA_VERSION = 9
 
 _DEFAULT_STATE_DIR = "/workspace/state/flight-assist"
 _STATE_DIR_ENV = "FLIGHT_ASSIST_STATE_DIR"
@@ -137,19 +140,28 @@ def _atomic_write_json(path: Path, payload: dict) -> None:
     documented atomic for files on the same drive.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(payload, separators=(",", ":"), sort_keys=True), encoding="utf-8")
-    os.replace(tmp, path)
+    descriptor, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".tmp", dir=path.parent)
+    tmp = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as stream:
+            os.fchmod(stream.fileno(), 0o600)
+            stream.write(json.dumps(payload, separators=(",", ":"), sort_keys=True))
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
-def _read_json_with_version(path: Path, *, migrate: bool = True) -> dict | None:
+def _read_json_with_version(
+    path: Path, *, migrate: bool = True, schema_version: int = STATE_SCHEMA_VERSION
+) -> dict | None:
     """Read a JSON file, validate schema_version. Return None if missing.
 
     Raises StateError on any of: JSON corruption, non-object payload,
     missing schema_version, or schema_version of a non-int type
     (including bool, since `bool` is a subclass of `int` in Python).
 
-    schema_version equal to STATE_SCHEMA_VERSION returns the payload.
+    A version equal to the selected schema_version returns the payload.
+    Config selects CONFIG_SCHEMA_VERSION; other records use STATE_SCHEMA_VERSION.
     Any OTHER version is handled per the `migrate` kwarg:
     - `migrate=True` (owner path): a LOWER version runs `_migrate`,
       which upgrade-and-rewrites the file before returning; unknown
@@ -191,21 +203,23 @@ def _read_json_with_version(path: Path, *, migrate: bool = True) -> dict | None:
             f"state file {path} has schema_version of type {type(version).__name__} "
             f"({version!r}), expected int — remove the file and let the owner skill rewrite it"
         )
-    if version > STATE_SCHEMA_VERSION:
+    if version > schema_version:
         if not migrate:
             return None
         raise StateError(
             f"state file {path} has schema_version {version}, this module is at "
-            f"{STATE_SCHEMA_VERSION} — upgrade flight-assist, or remove the file"
+            f"{schema_version} — upgrade flight-assist, or remove the file"
         )
-    if version < STATE_SCHEMA_VERSION:
+    if version < schema_version:
         if not migrate:
             return None
-        payload = _migrate(payload, from_version=version, path=path)
+        payload = _migrate(payload, from_version=version, path=path, schema_version=schema_version)
     return payload
 
 
-def _migrate(payload: dict, *, from_version: int, path: Path) -> dict:
+def _migrate(
+    payload: dict, *, from_version: int, path: Path, schema_version: int = STATE_SCHEMA_VERSION
+) -> dict:
     """Owner-side schema migration. Upgrades old payloads in place and rewrites.
 
     Migrations are additive only — non-owner readers see the latest
@@ -284,24 +298,38 @@ def _migrate(payload: dict, *, from_version: int, path: Path) -> dict:
         # no shape to backfill on migration — the next precheck poll repopulates
         # it. Config and active-flights files only get a schema_version bump.
         version = 7
-    if version != STATE_SCHEMA_VERSION:
+    if version == 7:
+        # v8 adds optional EV planner preferences to config. Absence retains
+        # legacy routing; no vehicle authority or default mapping is inferred.
+        version = 8
+    if version == 8 and schema_version == CONFIG_SCHEMA_VERSION:
+        # Only config gains the optional venue-radius setting. Flight records
+        # retain version 8; no flight snapshots or alert markers are invalidated.
+        version = CONFIG_SCHEMA_VERSION
+    if version != schema_version:
         # Unknown older version: refuse to silently pass through. The
         # branches above are the authoritative list of known upgrade
         # paths; anything not reaching the current version is either
         # corruption or a downgrade gap and needs human intervention.
         raise StateError(
             f"state file {path} has schema_version {from_version}, no migration "
-            f"path registered to reach {STATE_SCHEMA_VERSION} — remove the file or "
+            f"path registered to reach {schema_version} — remove the file or "
             f"restore a known version"
         )
-    payload["schema_version"] = STATE_SCHEMA_VERSION
+    payload["schema_version"] = schema_version
     _atomic_write_json(path, payload)
     return payload
 
 
 def read_config() -> dict | None:
-    """Return the plugin-wide config (home_address, etc.) or None if not set."""
-    return _read_json_with_version(state_dir() / CONFIG_FILE)
+    """Read shared config without interpreting another consumer's preferences.
+
+    Drive-engine and its intake validate optional EV input before using it.
+    A malformed/future nested EV record cannot interrupt flight alert polling.
+    The root owner schema/version checks remain strict. Config has its own
+    version so a new optional planner setting does not invalidate flight records.
+    """
+    return _read_json_with_version(state_dir() / CONFIG_FILE, schema_version=CONFIG_SCHEMA_VERSION)
 
 
 def read_current_location() -> dict | None:
@@ -386,8 +414,46 @@ def read_current_location() -> dict | None:
 # origin. Older than this and origin resolution falls back to `home_address`,
 # on the principle that a stale location guess is worse than the static home
 # base (#18). 30 min matches the orchestrator's typical Telegram
-# live-location write cadence.
+# live-location write cadence. The at-airport presence check (#349) uses this
+# same window: a stale or future fix is not evidence of being at — or away
+# from — the departure airport.
 MAX_LIVE_ORIGIN_AGE_MINUTES = 30
+
+
+def _require_aware_now(now: datetime, caller: str) -> None:
+    if now.tzinfo is None or now.utcoffset() is None:
+        raise ValueError(f"{caller}: `now` must be timezone-aware (UTC)")
+
+
+def _fresh_location(now: datetime, *, caller: str) -> dict | None:
+    """Host-owned current-location.json when it is inside the freshness window.
+
+    Returns the shape-validated snapshot, or None when the file is missing,
+    unusable, in the future, or older than `MAX_LIVE_ORIGIN_AGE_MINUTES`.
+    None is absence of a fresh fix, not a location of its own.
+    """
+    _require_aware_now(now, caller)
+    loc = read_current_location()
+    if loc is None:
+        return None
+    captured = datetime.fromisoformat(loc["captured_at"].replace("Z", "+00:00"))
+    age = now - captured
+    if timedelta() <= age <= timedelta(minutes=MAX_LIVE_ORIGIN_AGE_MINUTES):
+        return loc
+    return None
+
+
+def fresh_live_coordinates(now: datetime) -> tuple[float, float] | None:
+    """Return `(latitude, longitude)` from a fresh live GPS fix, else None.
+
+    Same 30-minute window as `resolve_live_origin`. A missing, stale, or
+    future `captured_at` yields None — that is not proof the owner is away
+    from the departure airport (#349).
+    """
+    loc = _fresh_location(now, caller="fresh_live_coordinates")
+    if loc is None:
+        return None
+    return loc["latitude"], loc["longitude"]
 
 
 def resolve_live_origin(home_address: str | None, *, now: datetime) -> str | None:
@@ -415,18 +481,15 @@ def resolve_live_origin(home_address: str | None, *, now: datetime) -> str | Non
     `home_address` here, and the `captured_at` on a returned snapshot is always a
     parseable UTC string.
     """
-    if now.tzinfo is None or now.utcoffset() is None:
-        raise ValueError("resolve_live_origin: `now` must be timezone-aware (UTC)")
-    loc = read_current_location()
+    loc = _fresh_location(now, caller="resolve_live_origin")
     if loc is not None:
-        captured = datetime.fromisoformat(loc["captured_at"].replace("Z", "+00:00"))
-        age = now - captured
-        if timedelta() <= age <= timedelta(minutes=MAX_LIVE_ORIGIN_AGE_MINUTES):
-            return f"{loc['latitude']},{loc['longitude']}"
+        return f"{loc['latitude']},{loc['longitude']}"
     return home_address
 
 
 _CONFIG_OPTIONAL_FIELDS: dict[str, type] = {
+    "venue_radius_meters": int,
+    "ev_planning": dict,
     "home_address": str,
     "min_transfer_minutes": int,
     # Calendar reconciliation (#55). The flight ("Flighty Flights") calendar
@@ -461,6 +524,7 @@ _CONFIG_OPTIONAL_FIELDS: dict[str, type] = {
 # rejected louder at the write surface (see `write_config`).
 _CONFIG_NON_NEGATIVE_INT_FIELDS = frozenset(
     {
+        "venue_radius_meters",
         "min_transfer_minutes",
         "airport_clearance_domestic_minutes",
         "airport_clearance_international_minutes",
@@ -498,6 +562,31 @@ def write_config(config: dict) -> None:
                 f"for the documented config shape, and bump the schema before "
                 f"introducing new fields"
             )
+        if key == "ev_planning":
+            from ev_preferences import validate_ev_preferences
+
+            try:
+                validate_ev_preferences(value)
+            except ValueError:
+                # Other config owners carry this optional record opaquely.
+                # They may preserve an unchanged unsupported/bad value, but
+                # cannot introduce or modify one. EV intake validates strictly.
+                previous = _read_json_with_version(
+                    state_dir() / CONFIG_FILE, migrate=False, schema_version=CONFIG_SCHEMA_VERSION
+                )
+                if (
+                    previous is None
+                    or "ev_planning" not in previous
+                    or json.dumps(previous["ev_planning"], sort_keys=True)
+                    != json.dumps(value, sort_keys=True)
+                ):
+                    raise
+                print(
+                    "[flight-assist] Existing EV preferences preserved unchanged. Inspect or "
+                    "update their owner schema before EV planning; other config fields can update.",
+                    file=sys.stderr,
+                )
+            continue
         expected_type = _CONFIG_OPTIONAL_FIELDS[key]
         if expected_type is int and isinstance(value, bool):
             raise ValueError(f"write_config: field '{key}' is bool {value!r}, expected int")
@@ -514,7 +603,7 @@ def write_config(config: dict) -> None:
         # reject at the write surface.
         if key in _CONFIG_NON_NEGATIVE_INT_FIELDS and value < 0:
             raise ValueError(f"write_config: field '{key}' is {value}, expected non-negative int")
-    payload = {**config, "schema_version": STATE_SCHEMA_VERSION}
+    payload = {**config, "schema_version": CONFIG_SCHEMA_VERSION}
     _atomic_write_json(state_dir() / CONFIG_FILE, payload)
 
 

@@ -1,6 +1,8 @@
 # Precheck Wake Event Payloads
 
-Reference for the `data.events` payload the precheck script emits on `wake_agent: true`. Each event is `{"flight_id": int | null, "event": {...}}`. `flight_id` is `null` only for the source-level events (`byair_unreachable`, `byair_recovered`, `sync_internal_error`, `sync_internal_recovered`). Consumed by `SKILL.md` Step 3 to compose user-facing notifications.
+Reference for the events the precheck renders into notices (`notices.py`) and reports in its `data.events`. Each event is `{"flight_id": int | null, "event": {...}}`. `flight_id` is `null` only for the source-level events (`byair_unreachable`, `byair_recovered`, `sync_internal_error`, `sync_internal_recovered`). Consumed by `SKILL.md` Step 3 to compose user-facing notifications.
+
+Flight poll events also carry an opaque `notification_id`. The precheck persists it before advancing the snapshot, sends the rendered notice through the host itself and confirms the ID only on the host's success (#370).
 
 ## Event Reasons
 
@@ -45,7 +47,7 @@ Same trigger as `cancelled` but for `diverted` status.
 {"reason": "inbound_delay_predicted", "delay_minutes": 35, "predicted_time": "2026-05-17T13:00:00-07:00"}
 ```
 
-`delay_minutes` is the predicted inbound-aircraft delay; `predicted_time` is the new estimated departure. Firing threshold and dedupe live in `wake_rules.py` (`detect_wake_events`).
+`delay_minutes` is the predicted inbound-aircraft delay; `predicted_time` is the new estimated departure. The precheck derives that clock from the flight record's scheduled departure plus the current positive inbound delay, preserving the scheduled offset. It enriches only the notification projection; the persisted schema-7 snapshot has no new field. Firing threshold and dedupe live in `wake_rules.py` (`detect_wake_events`).
 
 #### `inbound_delay_retracted`
 
@@ -55,13 +57,15 @@ Same trigger as `cancelled` but for `diverted` status.
 
 `prev_delay_minutes` is the delay last surfaced to the user; `new_delay_minutes` is the current prediction (`null` when retracted entirely). Send the all-clear even if an earlier surface escalated to "rebook now" — without it, silence reads as still-delayed. Firing conditions live in `wake_rules.py` (`detect_wake_events`).
 
+An unsent prediction that recovers produces no all-clear. If an earlier prediction was delivered, the clear refers to that last confirmed prediction. A more recent confirmed all-clear supersedes older confirmed predictions.
+
 #### `boarding_started`
 
 ```json
 {"reason": "boarding_started"}
 ```
 
-Fires on transition into actual boarding, gated on the real-boarding signal rather than the `computed_status` label alone — byAir labels the phase `boarding` before boarding starts. The real-boarding predicate is also held against flight-assist's own planned boarding window, the one its boarding block uses (#295), each snapshot judged at its own poll instant. First-cycle "already boarding" does not fire. The `phase_markers.boarding_fired` flag is reserved for a future boarding-prep notification and does not gate this event in v0.1. Firing conditions and the real-boarding predicate live in `wake_rules.py` (`detect_wake_events`, `is_real_boarding`); the window in `phase_markers.py` (`boarding_window_open`).
+Fires on transition into actual boarding, gated on the real-boarding signal rather than the `computed_status` label alone — byAir labels the phase `boarding` before boarding starts. The real-boarding predicate is also held against flight-assist's own planned boarding window, the one its boarding block uses (#295), each snapshot judged at its own poll instant. First-cycle "already boarding" does not fire. An undelivered notice retries while the live snapshot still reflects boarding. The precheck sets `phase_markers.boarding_fired` only from a confirmed receipt and suppresses subsequent transitions on that consumed flag; existing true legacy flags remain consumed. Firing conditions and the real-boarding predicate live in `wake_rules.py` (`detect_wake_events`, `is_real_boarding`); the window in `phase_markers.py` (`boarding_window_open`).
 
 #### `carousel_revealed`
 
@@ -118,10 +122,11 @@ Fires once per flight. The firing logic lives in `phase_markers.py` (`check_day_
 #### `time_to_leave`
 
 ```json
-{"reason": "time_to_leave", "leave_by": "2026-05-18T16:15:00+00:00", "travel_time_minutes": 30, "scheduled_dep_time": "2026-05-18T17:00:00+00:00"}
+{"reason": "time_to_leave", "leave_by": "2026-05-18T16:15:00+00:00", "travel_time_minutes": 30, "scheduled_dep_time": "2026-05-18T17:00:00+00:00", "missed": false}
+{"reason": "time_to_leave", "leave_by": "2026-05-18T16:45:00+00:00", "travel_time_minutes": 0, "scheduled_dep_time": "2026-05-18T17:00:00+00:00", "missed": true}
 ```
 
-Fires when `now + travel_time + 15min buffer ≥ scheduled_dep_time`. `travel_time_minutes` is the in-traffic estimate from Google Maps Distance Matrix. Suppressed once the snapshot shows the flight really boarding or already gone — departed, en_route, landed, cancelled, or diverted (`phase_markers.is_boarding_or_gone`) — the leave-by alert is moot by then (#102).
+Fires when `now + travel_time + 15min buffer ≥ scheduled_dep_time`. `travel_time_minutes` is the in-traffic estimate from Google Maps Distance Matrix. `skills/flight-assist/phase_markers.py` (`check_time_to_leave`) owns timely classification, including the prior poll’s due time and the declared scheduler tick. A new snapshot’s cadence, a longer outage, or an unrecognised prior status does not grant an unbounded timely retry. Every other fire has `missed` true. SKILL.md then says the leave-by has passed and names alternatives. Suppressed when the snapshot is really boarding, taxiing / pushed back / gate-closed, already gone (`phase_markers.is_boarding_or_gone`), or a fresh GPS fix is inside the departure-airport radius. Every missed fire requires a fresh GPS fix clearly away from that airport **and** a documented pre-departure `computed_status` (`scheduled`, `check_in_open`, or `boarding` that is not real boarding). Absent, stale, or ambiguous location is not proof of being away; empty, missing, or malformed status is not proof the flight has not left (#102 / #349).
 
 #### `gate_assignment`
 
@@ -177,7 +182,18 @@ Fires when a flight appeared in `byair_list_trips` that wasn't on the active-fli
 }
 ```
 
-Fires when a previously-tracked flight is no longer in `byair_list_trips` (e.g., the trip expired or the user untracked it upstream). The sync script deletes the per-flight state file — the event payload captures the prior-state metadata BEFORE the delete so the agent's composition template has `code` to render. Reading state by `flight_id` after this event arrives returns None (state already deleted).
+Fires when a previously tracked flight disappears from `byair_list_trips` and
+`skills/flight-assist/sync_tripit.py::_completed_removal` does not prove its arrival
+is past. Completed expirations are quiet: no removal event and no wake. Future,
+in-air and unknown-timing removals remain actionable tracking checks; an unknown
+arrival must never be presented as a completed flight. Arrival equal to the
+sync clock is not strictly past and also remains visible.
+
+The payload captures prior code and scheduled times before the existing state
+lifecycle runs. Every removed ID leaves the active index. A state file without
+managed calendar entries is deleted; a nonempty `calendar_events` ledger remains
+as the existing reconciliation tombstone. Neither quiet suppression nor a
+missing state authorizes deleting that ledger or changing calendar history.
 
 ### Source-level (from `skills/flight-assist/sync_tripit.py`, #326)
 

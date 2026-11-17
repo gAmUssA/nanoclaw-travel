@@ -1,5 +1,176 @@
 # Changelog
 
+## 0.3.13 — 2026-11-17
+
+- chore(deps): make Renovate the only dependency scanner (#394)
+
+## 0.3.12 — 2026-11-17
+
+- Update dependency ruff to v0.17.5 (#383)
+
+## 0.3.11 — 2026-11-15
+
+- feat: implement the architecture plan (#389)
+
+## 0.3.10 — 2026-11-15
+
+- chore: refresh the Tessl-generated ignore block (#390)
+
+## 0.3.9 — 2026-11-15
+
+- fix(flight-assist): treat socket timeouts like URLError (#388)
+
+## 0.3.8 — 2026-11-12
+
+- feat(drive-engine): arrive at a talk's Prep hold, not its start (#381) (#382)
+
+## 0.3.7 — 2026-11-08
+
+### Match conference rooms by driving distance, not geocoding (#373)
+
+The venue-radius check geocoded the venue and the session address and compared coordinates, which needed the Google Geocoding API (not enabled) and fell back to TomTom guesses. It now asks the Distance Matrix the sweep already uses for the driving distance from venue to session; within `venue_radius_meters` (default 500 m) it is the same venue and gets no drive. The Google geocode path in `maps_client` is removed.
+
+## 0.3.6 — 2026-11-08
+
+### Plan long meeting drives when TripIt has no flight or train (#377)
+
+A meeting drive over 3 hours from home was dropped without a word (2026-11-07 Asher pickup at ATL, 227 min). The 3-hour cap assumed he must be away. Per the owner's rule, a drive between 3 and 9 hours is now a road trip: with no TripIt flight landing in the 24 hours before the event (or flight/train leaving in the 24 hours after it), the drive is planned and the notice says «no flight or train in TripIt, so I assumed you drive», with the usual 'skip' reply. When a flight or train is booked, the drive is dropped and the airport or station drives replace it. A drive over 9 hours is held as a missing booking and reported as an unplanned drive. Drives under 3 hours are unchanged.
+
+## 0.3.4 — 2026-11-05
+
+### Match conference rooms by map radius (#373)
+
+Inside a confirmed attendance window, a geocoded room within 500 metres of the grounded venue counts as on site, with no meeting drive or notice. The existing maps client resolves points with its Google/TomTom chain; per-sweep memoization includes failures. Unknown or approximate locations retain explicit-label matching with a diagnostic. The radius is configurable through the existing config owner. Config alone advances to schema 9, preserving old values; flight records and alert markers stay at 8. Legacy attendance and outside appointments retain their behavior.
+
+## 0.3.3 — 2026-11-03
+
+### Send flight notices from the precheck, not the model (#370)
+
+A flight notice used to depend on the model doing two things: sending it, then running a confirm script. #341 lost notices when that chain broke. The flight-assist precheck now renders each due notice from a fixed template, sends it through the host, and confirms it in the journal only when the host reports the send done. A notice the host does not confirm is offered again five minutes later. The precheck also runs the calendar reconcile itself, so a flight event no longer wakes the model. The TripIt sync's outage and tracking notices go through the same templates and host send, and a failed send there makes the run exit non-zero. The confirm script, its rule, the v1/v2 journal migrations and the legacy byte allowance are gone; the live journal was already v3. Notice wording stays the same. Two changes: arrival logistics now give landing time, terminal, gate and carousel, without the rideshare or lounge suggestions; the day-before check lists the calendar items as given.
+
+## 0.3.2 — 2026-11-03
+
+### Delete the drive engine's dead legacy-block path (#369)
+
+The convert path and the legacy block readers never ran: the live sweep managed no legacy generation, and no old drive-planner or flight-assist blocks are left. Removed, keeping the shadow dry run.
+
+## 0.3.1 — 2026-11-02
+
+### Keep out-of-office, free and declined events from blocking drives (#366)
+
+The installed 0.3.0 check held every attendance commute on 2026-11-03 and 11-04 with `attendance commute conflicts with an actual Calendar interval`. The trip's `[TripIt OOO]` entry carries `dateTime` bounds across the whole trip, and the sweep read it as one meeting covering every commute. All eight upcoming trips carry the same entry. Free and self-declined events had the same effect. The sweep's busy windows now skip all three, and the same windows protect EV charging adjustments, so those no longer treat them as commitments either. Real meetings still hold a commute.
+
+## 0.3.0 — 2026-11-01
+
+### Plan explicit conference attendance windows (#366)
+
+Record grounded per-day on-site hours and a canonical venue address through the existing attendance owner, with cited agenda inputs or actual owner confirmation. The shared timeline uses the venue inside each window, plans one daily commute pair, and keeps a later checkout-day airport departure at the venue when no hotel return is available. Explicit row-2 occurrence scope ends expired hotel-base availability without changing default/legacy itineraries or whole-trip context. Store 2 preserves legacy row-1 semantics until re-recorded; empty new windows remain ordinary meetings. The intake offers the existing three owner-answer choices; no hours, native record or Calendar acceptance are inferred.
+
+## 0.2.172 — 2026-11-01
+
+### Preserve conference bridge origins and reject negative routes (#356)
+
+Ongoing confirmed conference attendance supplies the venue for tight-gap outside meetings. Negative meeting or post-arrival route durations follow the existing route-failure safety paths, rather than removing drives as definitive one-minute no-drive results. Ended/unconfirmed attendance, valid zero-to-one-minute routes, flight guards and native-grounding requirements remain unchanged.
+
+- Keep completed-flight removals quiet while preserving actionable future/unknown tracking changes and the existing calendar tombstone lifecycle.
+
+## 0.2.170 — 2026-10-29
+
+### Include measured EV charging time in drives (#339)
+
+Long drive plans add configurable charging-stop time before the existing combined reconcile, moving arrive-by departures earlier and extending depart-after returns. Remaining energy is carried between connected legs of the same selected native vehicle; only grounded destination charging replenishes it. The supported Tesla estimate supplies measured weighted consumption and capacity, with explicit highway/cold allowances rather than a highway-only measurement claim. Fresh exact-vehicle/destination car navigation can refine the day-of estimate. Missing, ambiguous or invalid provider inputs retain legacy blocks with configured gaps reported in diagnostics. Flight-assist config 8 adds validated non-authorizing planner preferences; prior fields and all flight gates are preserved. Out-of-horizon drives do not suppress nearer estimates; a missing/completed outbound cannot give a return a fresh full-battery forecast. Existing EV allowances are held on unavailable inputs, and minute-sized allowance changes are reconciled independently of traffic jitter. The compatible published Tesla0.3.0 transport and its source authority were verified through a normal declared install; real vehicle/shadow/calendar acceptance remains Root-owned and separate from source release.
+
+## 0.2.169 — 2026-10-29
+
+### Declare the Tesla provider for trusted source review (#339)
+
+Add the published Tesla plugin to the managed source dependency manifest. The fleet reviewer can load its authority from the trusted base before reviewing the separate EV drive-time implementation.
+
+## 0.2.168 — 2026-10-28
+
+### Judge day-before drop-in windows by closing time (#354)
+
+The day-before calendar reader recognizes explicit window wording and check-session titles, marks listed events with `window`, and keeps a window as a conflict only when it has closed by the flight's effective arrival. A 13:30–16:45 window remains reachable after a 15:10 landing; a 17:00 landing misses it. The reader owns no venue-specific ground-duration input and uses arrival without inventing routing time. Ordinary meeting overlap, declined/cancelled filtering and operator-local rendering remain. The compose treats a listed window as a closing deadline and never asks for its “real” start.
+
+## 0.2.166 — 2026-10-28
+
+### Avoid invented meeting drives at conferences (#356)
+
+Explicit attendance dates, timezone and exact conference/venue labels suppress on-site meeting anchor drives without depending on hotel bookings or a static meeting-ID list. New booth meetings match only whole approved location labels or exact spaced-dash components; city/title substrings never establish attendance. Real bridges to outside venues remain. The private owner intake validates and atomically records planner inputs; absent data makes no attendance claim and malformed/unknown schemas stop the sweep before calendar writes.
+
+Meeting anchors no longer borrow a trip-city centroid when lodging is missing. Routed meeting legs at or below one minute produce no block or added-drive notice, including meeting handoffs and returns regenerated after landing. A no-drive arrival handoff retains the genuine later hotel return. Ordinary airport fallback and flight guards remain intact.
+
+
+## 0.2.165 — 2026-10-28
+
+### Keep notification digests compatible with nightly backup (#355)
+
+Notification-store schema 3 names its derived identity `notice_digest`. The former `key` label made the maintained backup scanner classify two SHA-256 notice identities as API credentials and refuse the nightly snapshot. The owner validates and migrates schema 2 under its existing lock, preserving map keys, exact notice IDs, confirmed receipts and pending retry deadlines. Schema 1 keeps its existing pending-leave migration before the rename. Invalid or future journals and failed replacements preserve the original bytes; scanner rules and allowlists remain intact.
+
+The current store reserves at most 20,480 extra bytes for the field rename, keeping valid near-limit legacy journals readable across migration and restart. Legacy admission stays capped at 4 MiB; event and notice-count bounds remain intact.
+
+## 0.2.163 — 2026-10-26
+
+### Suppress time_to_leave after taxi-out and at-airport GPS (#349)
+
+Notification-store schema 2 migrates valid v1 records under the existing lock, preserving confirmed delivery identities and non-leave retry clocks. Pending v1 leave notices are dropped without consuming the phase so a fresh poll must regenerate them under current timely/missed and location gates.
+
+`time_to_leave` stayed silent for real boarding and the documented gone statuses, then fired 19 minutes after leave-by on a taxi-out snapshot while live GPS was already in the departure terminal. The gate now treats taxi / pushback (including past-tense "pushed back") / gate-closed prose on `computed_status_detail` as gone-phase, independent of `computed_status` and of the boarding window, and treats unpublished status strings as not pre-departure rather than minting a live enum. A fresh (≤ 30 min) GPS fix inside 3 km of the departure airport suppresses the alert. Airport coordinates come from a fresh `byair.get_airport` call bound to the live `get_flight.depAirport.id` on every qualifying poll. Persisted `last_snapshot.dep_lat`/`dep_lon` remain diagnostic hints and never suppress a notification without this live verification; nested `get_flight.depAirport` is not assumed to carry coordinates. The lookup runs only when a `time_to_leave` could still fire: a fresh fix, Maps configured, the marker unfired, departure inside the 6-hour travel-query window. It is an additional bounded byAir call inside one flight's poll, so `_run_cycle` holds its 6-second reserve back from the start deadline of exactly the flights that may make it, which keeps a poll started at the deadline inside the 30-second kill; ordinary cycles keep their full budget, and a flight that cannot start in time defers to the next cycle rather than skipping the lookup. Maps’ Google request plus the optional TomTom geocodes/route share the reserved eight seconds through a two-second HTTP timeout on each of its four possible requests. The byAir call timeout is six seconds, leaving room for both calls, the eight-second Maps request chain, the five-second real operator-zone reader and teardown within the unchanged 30-second kill. A deferred flight's older successful-poll timestamp gives it priority over a refreshed predecessor on the next cycle; new and unreadable records retain their original slots. The first actual poll at or after leave-by is the timely notice, as the issue expects: the previous successful `last_polled_at` is before leave-by and it lands by that prior poll’s due time plus the skill’s declared scheduler tick. A cadence change on the new snapshot, a longer outage gap, or an empty or unrecognised previous status never widens that window. A fresh captured fix supplies the routing origin before itinerary fallback, so an unrelated unplaceable flight cannot discard known location. Routing, airport presence and lookup admission all use the same location captured once per cycle; a host update during the poll cannot mix old presence with a new Maps origin. Every other fire is missed: they require a fresh GPS fix clearly away **and** a documented pre-departure status. Empty, missing, or malformed status is not proof the flight has not left. Absent, stale, or ambiguous location is not proof of being away. SKILL.md composes the missed payload as leave-by passed plus alternatives, and does not improvise taxi/gone copy off the snapshot.
+
+## 0.2.162 — 2026-10-26
+
+### Plan post-arrival meeting drives around inbound flights (#350)
+
+The post-arrival handoff and lodging return retain meeting-source’s three-hour plausibility cap and the same confirmed-driving-trip exemption; a long rejected meeting never replaces the ordinary airport-to-lodging drive.
+
+After removing an unreachable meeting, suppress the hotel return only for a non-overlapping follow-on with a surviving drive from the chosen venue, a verified held drive with the same route and timing, or the same venue. Remove invalid dependent outbound holds/blocks that still rely on the removed neighbour; otherwise restore the chosen meeting’s hotel return.
+
+No drive may start inside a flight's clearance / airborne / post-arrival window. An ongoing reachable meeting after landing replaces airport→lodging with airport→venue; the return goes to the period's addressable lodging. An ended or unreachable meeting gets no drive, and a trip-city centroid is not used when lodging exists. Flight identity, connection masking, and hold/delete semantics stay as they were, except that an airborne or centroid-stale block is deleted rather than held. Scan classification governs which meetings enter that composition: declined, cancelled, skipped, virtual, at-anchor, and planner-block events keep ordinary airport→lodging, including an active skip on a past-bucket meeting. A tight next meeting suppresses the hotel return. A protected return leaves a legitimate outbound; a protected outbound removes both meeting legs. Held-only meeting keys inside the window are deleted rather than preserved when routing fails. A covering stay without an address is not replaced by a later hotel. A failed venue→lodging route keeps ordinary airport→lodging. An unreachable ongoing meeting no longer makes a reachable one ambiguous: each candidate is routed first, a proven-unreachable one is dropped with its legs deleted, a failed route stays in play and keeps the fail-safe, and the survivor gets its hotel return back when the neighbour it was bridged to is gone. A held meeting leg is judged by the drive start of the existing block it keeps alive, not by its arrival anchor: a safe outbound that leaves before the clearance window survives a routing failure, and an unsafe one that starts inside the window is deleted even when it arrives after the airport readiness time. A meeting drive on an arrival day before the hotel's nominal check-in uses the ground period's addressed lodging instead of the trip-city centroid, without guessing a later hotel past an unaddressed stay or between two stays.
+
+## 0.2.161 — 2026-10-24
+
+### Report net timezone changes and named OOO operations (#346)
+
+Nightly sync now adds a deterministic net report before the model sees the result. Equal delete/create rows cancel as a multiset; ended Reclaim intervals do not appear as new travel. The original segments remain available for the host timezone schedule. Timezone changes never imply a trip name, and each created or deleted OOO block names its own upstream trip. Missing OOO names fail with an actionable diagnostic instead of inventing an attribution. The skill sends the rendered report lines verbatim and stays silent when there is no net change or conflict. Provider failure status survives the reporting pipeline. Net reporting uses the producer’s home-calendar date at midnight; the skill declares the full output contract and refuses malformed nested records before host persistence.
+
+## 0.2.160 — 2026-10-24
+
+### Load the host runtime contract for policy review
+
+Declare nanoclaw-host as an authoring dependency. The central reviewer installs authority plugins from the trusted base branch, so this declaration precedes changes that consume the host-owned runtime CLI contract. The existing dependency install and deployment gate remain owned by the host.
+
+## 0.2.158 — 2026-10-23
+
+### Keep fresh GPS fixes and refuse backdated drive creation (#343)
+
+Location fixes arriving during a sweep may be up to two minutes newer than its cycle clock. Airport departure diagnostics report planned versus live GPS origins without coordinates. Immediately before each create or legacy replacement, a separate fresh clock refuses starts already in the past and records a skipped-creation reason; patches to existing blocks remain allowed. The write clock is checked for each operation, including after earlier calendar calls.
+
+## 0.2.157 — 2026-10-22
+
+### flight-assist — consume notifications after confirmed delivery (#341)
+
+A wake previously advanced the snapshot and consumed its phase flags before the agent sent anything. Scheduled final text is internal, and the compose step could mistake that consumed flag for evidence that the user had already been notified. Flight notices now enter a separate schema-1 delivery store before snapshot writes. Pending attempts survive restarts and retry after five minutes, with refreshed flight data and both legs refreshed for connection warnings. Obsolete or expired observations are removed without creating receipts. An explicit successful `send_message` is followed by an exact-ID acknowledgement; stale acknowledgements cannot consume replacement notices. Existing schema-7 phase flags remain consumed legacy attempts, without importing them as receipts or replaying historical alerts. A send accepted immediately before a crash can still duplicate on retry.
+
+Pending inbound predictions and all-clears follow the exact refreshed estimate, including changes inside the wake detector's delta tolerance. Replacements preserve their attempt deadline and invalidate old IDs. The named flight-notification delivery contract declares native, checkout and Tessl helper lookup plus its JSON I/O; executable regression coverage runs the co-shipped helper through the declared native layout from an unrelated working directory.
+
+Undelivered departure shifts retain their original baseline across later small changes, so a +30-minute delay followed by another +10 minutes becomes a current +40-minute notice. Pending carousel and gate notices track their current values, including a gate disappearing and reappearing before delivery. A recovered shift or gate move needs no stale notice and creates no delivery receipt.
+
+An inbound warning that recovers before delivery produces no spurious all-clear. When an earlier prediction was actually delivered, its clear uses that last confirmed estimate; a newer delivered all-clear supersedes it. Prediction departure clocks are derived from the existing scheduled departure and current inbound-delay minutes in an ephemeral notification projection, leaving the persisted schema-7 shape unchanged. Regression coverage executes every declared helper lookup (native renderer, checkout and Tessl consumer).
+
+The delivery schema documents every root/row field, required presence, null meanings, phase-marker mapping, identity derivation and bounds, and binds stored event data to the versioned row's event-payload reference.
+
+A successful live refresh supersedes a pending upstream-removal notice. A continuing 404 retains that notice and its ID for retry.
+
+## 0.2.154 — 2026-10-20
+
+### travel-core — one itinerary timeline replaces the position ladder (#335)
+
+A shadow sweep on 2026-10-19 skipped every home↔BNA drive of the November trips as 13- to 35-hour "drives": the engine placed the operator at his destination on the day he flew out and on the day he flew back. Those trips' flights lived in byAir alone, and `trip_origin` read the TripIt schedule alone, so nothing told it he had left. Behind that sat a ladder of rules each added for one live case: a begin gate keyed on the first transport or check-in (#233, #235), a staging-stay lead time, an inbound window and a connection window for hotel changes (#323, #331), a home-metro rule for placeholder trips (#314), and an `opened_from_home` question plus a TripIt-alias grouping pass to decide homecomings (#235, #219). A check-in stamped two hours before the flight to it (the Thanksgiving Airbnb) still read as arrived.
+
+`travel-core/itinerary.py` is the one position model now. Transports split time into ground periods; each lodging stay belongs to the period it overlaps most, and counts only inside it. A period that began with a landing is home at the profile's `home_airport`, away anywhere else; the period before any transport, or any period when home airports are unknown, is judged by the trip covering the instant (home until its first transport or stay, away after). Away with no stay covering, the anchor is the hotel last checked out of on that trip (between a journey's legs), else the trip's city, else unresolved. A trip with nothing booked is home, which retires the home-metro rule. The sweep resolves its byAir airports first, builds one itinerary from the schedule and the merged byAir ∪ TripIt flights, and every position question (airport legs, meeting anchors) reads it; an arrival goes wherever the itinerary says he is after landing, so the homecoming pass, `opened_from_home`, `group_into_itineraries` and the flight alias set are gone. flight-assist's time-to-leave "home" reads the same itinerary with its tracked flights, built from its own byAir poll: the snapshot's airport codes and live times, a cancelled flight left out, a diverted one landing at no known airport. Where TripIt and byAir carry the same flight, the byAir copy and its live times win.
+
+Replayed against the live schedule and byAir flights: all twelve November home↔BNA legs now plan from and to the house, New York, San Francisco and San Antonio resolve to the booked lodging, and DevCon, KubeCon and PortCon to the trip city until their hotels reach the schedule. The 68 position cases of `tests/test_trip_origin.py` carry over as fixtures, with three deliberate changes: a trip with nothing booked, and the day before a date-only flight, read as home rather than the trip city, and a stay known only by its check-out covers its trip up to check-out. The replay also caught the local schedule copy dating KubeCon a day after its outbound flight; TripIt's own feed already had the flight's date, and the nightly refresh had not caught up. A landing away is judged by the airport, so a stale trip wrapper can no longer keep the operator home.
+
 ## 0.2.153 — 2026-10-20
 
 ### drive-engine — a leg it cannot compute keeps its block; airports route by coordinates (#334)

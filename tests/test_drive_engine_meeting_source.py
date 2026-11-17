@@ -21,6 +21,7 @@ sys.path.insert(0, str(REPO_ROOT / "skills" / "drive-engine"))
 from block_codec import build_extended_properties  # noqa: E402
 from meeting_source import (  # noqa: E402
     TripPresence,
+    booked_trips,
     exclude_drive_block_events,
     meeting_desired_blocks,
 )
@@ -105,20 +106,58 @@ def test_outbound_and_return_are_distinct_blocks():
 # --- travel-away suppression (the core fix) ---------------------------------
 
 
-def test_implausible_drive_is_suppressed():
-    # Operator abroad; meeting at home → routed drive is absurd → no block.
+def test_a_drive_past_the_road_trip_bound_is_a_missing_booking():
     m = FakeMeeting(
-        "m1", "Swimming Practice", (FakeLeg("outbound", "Copenhagen", "Pool TN", arrive_by=_dt(9)),)
+        "m1", "Swimming Practice", (FakeLeg("outbound", "Home", "Pool TN", arrive_by=_dt(9)),)
     )
-    blocks, skipped, _held = meeting_desired_blocks([m], route=const_route(9 * 60))  # 9h
+    blocks, skipped, held = meeting_desired_blocks([m], route=const_route(10 * 60))
     assert blocks == []
-    assert any("implausible" in s and "suppressed" in s for s in skipped)
+    assert any("no flight or train in TripIt" in s for s in skipped)
+    assert [leg.identity for leg in held] == ["m1"]  # announced as unplanned
+
+
+def test_a_booked_flight_or_train_replaces_a_long_drive():
+    # A flight landing before the event, or a train leaving after it, is how he
+    # gets there and back: no drive, and no hold keeping an assumed block.
+    m = FakeMeeting(
+        "m1",
+        "Conference",
+        (
+            FakeLeg("outbound", "Home", "Venue", arrive_by=_dt(9)),
+            FakeLeg("return", "Venue", "Home", depart_after=_dt(17)),
+        ),
+    )
+    booked = [(_dt(5), _dt(7)), (_dt(19), _dt(22))]
+    blocks, skipped, held = meeting_desired_blocks([m], route=const_route(5 * 60), booked=booked)
+    assert blocks == [] and held == []
+    assert sum("flight or train covers it" in s for s in skipped) == 2
+
+
+def test_a_flight_outside_the_booking_window_does_not_count():
+    m = FakeMeeting(
+        "m1", "Pickup", (FakeLeg("outbound", "Home", "ATL", arrive_by=_dt(10, day=14)),)
+    )
+    booked = [(_dt(5, day=12), _dt(7, day=12))]  # two days earlier
+    blocks, _skipped, _held = meeting_desired_blocks([m], route=const_route(4 * 60), booked=booked)
+    assert [b.road_trip for b in blocks] == [True]
+
+
+def test_booked_trips_reads_timed_flights_and_trains_only():
+    schedule = [
+        {"type": "Flight", "start": "2020-07-13T05:00:00Z", "end": "2020-07-13T07:00:00Z"},
+        {"type": "Rail", "start": "2020-07-13T19:00:00Z", "end": "2020-07-13T22:00:00Z"},
+        {"type": "Lodging", "start": "2020-07-13T15:00:00Z", "end": "2020-07-14T11:00:00Z"},
+        {"type": "Flight", "start": "2020-07-13", "end": "2020-07-14"},
+        {"type": "Flight", "start": "garbage", "end": None},
+    ]
+    assert booked_trips(schedule) == [(_dt(5), _dt(7)), (_dt(19), _dt(22))]
+    assert booked_trips(None) == []
 
 
 def test_plausible_drive_at_threshold_kept():
     m = FakeMeeting("m1", "Offsite", (FakeLeg("outbound", "Home", "Venue", arrive_by=_dt(9)),))
     blocks, _, _held = meeting_desired_blocks([m], route=const_route(180))  # exactly 3h
-    assert len(blocks) == 1
+    assert [b.road_trip for b in blocks] == [False]  # an ordinary meeting drive
 
 
 def test_bridge_drive_longer_than_gap_is_suppressed():
@@ -207,16 +246,15 @@ def test_exclude_drive_block_events_by_marker():
     assert [e["id"] for e in kept] == ["e1"]
 
 
-def test_exclude_keeps_legacy_dp_blocks_for_scan_has_block():
-    # A legacy drive-planner (dp) block must PASS THROUGH: scan uses it to bucket
-    # its meeting as already-handled. Dropping it would make the engine create a
-    # dengine duplicate on top of the dp block.
+def test_exclude_keeps_retired_drive_planner_blocks_for_scan_has_block():
+    # A block the retired drive-planner left must PASS THROUGH: scan reads its
+    # marker to bucket the meeting as already handled. Dropping it would make
+    # the engine create a duplicate block on top of it.
     events = [
         {
             "id": "dp1",
             "summary": "Drive: Swimming Practice",
-            "description": "x\n[drive-planner:meeting=mtg9:dir=outbound]\n"
-            '<!--dp:{"v":2,"a":"2020-07-12T08:00:00+00:00"}-->',
+            "description": "x\n[drive-planner:meeting=mtg9:dir=outbound]\n",
         },
         {
             "id": "de1",
@@ -230,12 +268,10 @@ def test_exclude_keeps_legacy_dp_blocks_for_scan_has_block():
                 destination="Venue",
             ),
         },
+        {"id": "x1", "summary": "Drive: no marker at all"},
         {"id": "m1", "summary": "Real meeting"},
     ]
-    kept = [e["id"] for e in exclude_drive_block_events(events)]
-    assert "dp1" in kept  # dp kept — scan needs it
-    assert "de1" not in kept  # dengine dropped — no self-ingestion
-    assert "m1" in kept
+    assert [e["id"] for e in exclude_drive_block_events(events)] == ["dp1", "m1"]
 
 
 # --- display zone (#301) ----------------------------------------------------
@@ -319,13 +355,15 @@ def _pair_route(pairs):
     return lambda o, d: pairs.get((o, d))
 
 
-def test_away_suppression_still_fires_for_a_meeting_off_any_trip():
+def test_a_long_drive_with_no_booking_is_planned_as_a_road_trip():
+    # 2026-11-07 Asher pickup at ATL: 227 min from home, no flight or train in
+    # TripIt, and the drive was dropped without a word (#377).
     meeting = FakeMeeting(
-        "m1", "Swim practice", (FakeLeg("outbound", HOME_ADDR, VENUE, arrive_by=_dt(20)),)
+        "m1", "Asher pickup", (FakeLeg("outbound", HOME_ADDR, VENUE, arrive_by=_dt(20)),)
     )
-    blocks, skipped, _held = meeting_desired_blocks([meeting], route=const_route(234))
-    assert blocks == []
-    assert any("implausible" in note for note in skipped)
+    blocks, skipped, held = meeting_desired_blocks([meeting], route=const_route(227))
+    assert [(b.origin, b.road_trip) for b in blocks] == [(HOME_ADDR, True)]
+    assert skipped == [] and held == []
 
 
 def test_away_suppression_spared_for_a_trip_the_operator_drives_to():
@@ -462,3 +500,162 @@ def test_a_bridge_leg_keeps_its_prior_venue_origin_on_a_driving_trip():
         driving_to={"m2": TripPresence(lodging=LODGING, is_first=False, is_last=False)},
     )
     assert [(b.origin, b.destination) for b in blocks] == [("Prior Venue", VENUE)]
+
+
+# --- talk-prep Prep arrival target (#381) ------------------------------------
+#
+# The 11-19 QCon talk: 13:00 PST (21:00Z), Prep hold 12:30 PST (20:30Z), an
+# 8-minute route from the hotel.
+
+QCON_TALK = datetime(2026, 11, 19, 21, 0, tzinfo=UTC)
+QCON_PREP = datetime(2026, 11, 19, 20, 30, tzinfo=UTC)
+
+
+def _qcon(*, talk=QCON_TALK):
+    return FakeMeeting(
+        "qcon",
+        "QCon SF workshop",
+        (
+            FakeLeg("outbound", "Hotel", "Hyatt Regency SF", arrive_by=talk),
+            FakeLeg("return", "Hyatt Regency SF", "Hotel", depart_after=talk + timedelta(hours=2)),
+        ),
+        timezone="America/Los_Angeles",
+    )
+
+
+def _by_kind(blocks):
+    return {b.kind: b for b in blocks}
+
+
+def test_a_talk_drive_arrives_at_the_prep_start():
+    blocks, skipped, held = meeting_desired_blocks(
+        [_qcon()], route=const_route(8), prep_arrival={"qcon": QCON_PREP}
+    )
+    assert skipped == [] and held == []
+    outbound = _by_kind(blocks)["meeting_outbound"]
+    assert outbound.end == outbound.anchor == QCON_PREP
+    assert outbound.start == datetime(2026, 11, 19, 20, 22, tzinfo=UTC)
+    assert outbound.prep_for == QCON_TALK
+    assert outbound.earliest_start is None
+    returning = _by_kind(blocks)["meeting_return"]
+    assert returning.start == returning.anchor == QCON_TALK + timedelta(hours=2)
+    assert returning.prep_for is None
+
+
+def test_a_moved_talk_drive_follows_the_moved_prep_hold():
+    moved_talk = QCON_TALK + timedelta(days=1, hours=1)
+    blocks, _, _ = meeting_desired_blocks(
+        [_qcon(talk=moved_talk)],
+        route=const_route(8),
+        prep_arrival={"qcon": moved_talk - timedelta(minutes=30)},
+    )
+    outbound = _by_kind(blocks)["meeting_outbound"]
+    assert outbound.anchor == moved_talk - timedelta(minutes=30)
+    assert outbound.prep_for == moved_talk
+
+
+def test_a_talk_without_a_prep_hold_keeps_the_talk_start():
+    # A removed hold (the reader said null) and a talk with no hold read the same.
+    with_none, _, _ = meeting_desired_blocks([_qcon()], route=const_route(8), prep_arrival={})
+    today, _, _ = meeting_desired_blocks([_qcon()], route=const_route(8))
+    assert with_none == today
+    outbound = _by_kind(today)["meeting_outbound"]
+    assert outbound.end == outbound.anchor == QCON_TALK
+    assert outbound.prep_for is None
+
+
+def test_a_prep_target_for_another_meeting_changes_nothing():
+    blocks, _, _ = meeting_desired_blocks(
+        [_qcon()], route=const_route(8), prep_arrival={"other": QCON_PREP}
+    )
+    assert _by_kind(blocks)["meeting_outbound"].anchor == QCON_TALK
+
+
+def test_an_unavailable_prep_read_holds_the_arriving_leg_only():
+    blocks, skipped, held = meeting_desired_blocks(
+        [_qcon()], route=const_route(8), prep_unavailable=frozenset({"qcon"})
+    )
+    assert [b.kind for b in blocks] == ["meeting_return"]
+    assert [(h.identity, h.kind, h.when) for h in held] == [("qcon", "meeting_outbound", QCON_TALK)]
+    assert skipped == ["meeting qcon outbound: talk-prep Prep window unavailable"]
+
+
+def test_a_held_prep_read_keeps_the_existing_block_through_reconcile():
+    from block_codec import GEN_UNIFIED, ParsedBlock
+    from reconcile import plan_reconcile
+
+    blocks, _, held = meeting_desired_blocks(
+        [_qcon()], route=const_route(8), prep_unavailable=frozenset({"qcon"})
+    )
+    current = ParsedBlock(
+        generation=GEN_UNIFIED,
+        event_id="qcon-block",
+        identity="qcon",
+        kind="meeting_outbound",
+        anchor=QCON_PREP,
+        origin="Hotel",
+        destination="Hyatt Regency SF",
+        baseline_seconds=480,
+    )
+    plan = plan_reconcile(
+        [b for b in blocks if b.kind == "meeting_outbound"],
+        [current],
+        held=frozenset(h.key for h in held),
+        now=QCON_PREP - timedelta(days=7),
+    )
+    assert plan.is_noop
+
+
+def _bridged(minutes_gap):
+    return FakeMeeting(
+        "qcon",
+        "QCon SF workshop",
+        (
+            FakeLeg(
+                "bridge",
+                "Moscone West",
+                "Hyatt Regency SF",
+                arrive_by=QCON_TALK,
+                gap_seconds=minutes_gap * 60,
+            ),
+        ),
+    )
+
+
+def test_a_bridge_drive_that_fits_before_prep_arrives_at_the_prep_start():
+    # The previous meeting ends 12:00 PST; 20 min drive; Prep at 12:30.
+    blocks, skipped, held = meeting_desired_blocks(
+        [_bridged(60)], route=const_route(20), prep_arrival={"qcon": QCON_PREP}
+    )
+    assert skipped == [] and held == []
+    (bridge,) = blocks
+    assert bridge.end == bridge.anchor == QCON_PREP
+    assert bridge.start == QCON_PREP - timedelta(minutes=20)
+    assert bridge.prep_for == QCON_TALK
+    assert bridge.earliest_start == QCON_TALK - timedelta(minutes=60)  # previous meeting's end
+
+
+def test_a_bridge_drive_that_cannot_reach_prep_keeps_the_talk_start():
+    # Q1 (a): the previous meeting ends 12:15 PST; a 20 min drive reaches the
+    # 13:00 talk but not the 12:30 Prep, so it is still planned to the talk.
+    blocks, skipped, held = meeting_desired_blocks(
+        [_bridged(45)], route=const_route(20), prep_arrival={"qcon": QCON_PREP}
+    )
+    assert held == []
+    (bridge,) = blocks
+    assert bridge.end == bridge.anchor == QCON_TALK
+    assert bridge.prep_for is None
+    assert bridge.earliest_start == QCON_TALK - timedelta(minutes=45)
+    assert skipped == [
+        "meeting qcon bridge: 20min drive from the previous meeting can't reach the "
+        "talk-prep Prep start — arriving by the talk start"
+    ]
+
+
+def test_a_bridge_drive_that_exactly_fits_before_prep_retargets():
+    blocks, skipped, _ = meeting_desired_blocks(
+        [_bridged(50)], route=const_route(20), prep_arrival={"qcon": QCON_PREP}
+    )
+    assert skipped == []
+    assert blocks[0].anchor == QCON_PREP
+    assert blocks[0].start == QCON_TALK - timedelta(minutes=50)

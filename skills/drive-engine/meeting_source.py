@@ -25,7 +25,7 @@ route failure or unresolved anchor skips that leg with a diagnostic, never a blo
 from __future__ import annotations
 
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -34,37 +34,33 @@ _BUNDLE_DIR = Path(__file__).resolve().parent
 if str(_BUNDLE_DIR) not in sys.path:
     sys.path.insert(0, str(_BUNDLE_DIR))
 
-from block_codec import GEN_LEGACY_DP, parse_block  # noqa: E402
+from block_codec import parse_block  # noqa: E402
 from reconcile import DesiredBlock, HeldLeg  # noqa: E402
-from scan import same_place  # noqa: E402
+from scan import _MARKER_RE, same_place  # noqa: E402
 
 # A drive block's human summary always starts with this.
 _DRIVE_SUMMARY_PREFIX = "Drive:"
 
 
 def exclude_drive_block_events(events: list[dict]) -> list[dict]:
-    """Filter the meeting scan input (#156 — calendar-as-output), keeping dp blocks.
+    """Filter the meeting scan input (#156 — calendar-as-output).
 
-    Drops the drive blocks the reused `scan` CANNOT classify — the engine's own
-    unified (dengine) blocks and legacy flight-assist (fadrive) airport blocks —
-    so a later sweep never treats one as a meeting and plans a drive TO the drive
-    block (self-referential duplicate).
-
-    KEEPS legacy drive-planner (dp) blocks: `scan` recognizes those and uses them
-    to bucket a meeting as already-handled (`has_block`). Hiding them would make
-    `scan` re-plan that meeting and the engine would create a dengine block on top
-    of the existing dp block — a duplicate. A `Drive:`-prefixed block with an
-    unreadable marker is dropped too (it can't be a genuine meeting).
+    Drops the engine's own drive blocks so a later sweep never treats one as a
+    meeting and plans a drive TO the drive block (self-referential duplicate). A
+    `Drive:`-prefixed block with an unreadable marker is dropped too, except a
+    block the retired drive-planner left on the calendar: `scan` reads its
+    marker to bucket that meeting as `has_block`, so no duplicate is planned.
     """
     kept: list[dict] = []
     for event in events:
         parsed = parse_block(event)
         if parsed is not None:
-            if parsed.generation == GEN_LEGACY_DP:
-                kept.append(event)  # scan needs dp blocks for has_block detection
-            continue  # dengine / fadrive — scan can't classify them; drop
+            continue  # the engine's own block — not a meeting
         summary = event.get("summary") if isinstance(event, dict) else None
         if isinstance(summary, str) and summary.strip().startswith(_DRIVE_SUMMARY_PREFIX):
+            description = event.get("description")
+            if isinstance(description, str) and _MARKER_RE.search(description):
+                kept.append(event)  # a retired drive-planner block: scan needs its marker
             continue  # a Drive: block with an unreadable marker — not a meeting
         kept.append(event)
     return kept
@@ -72,10 +68,19 @@ def exclude_drive_block_events(events: list[dict]) -> list[dict]:
 
 RouteFn = Callable[[str, str], "timedelta | None"]
 
-# A routed meeting drive longer than this is implausible as a "drive to a meeting"
-# — the operator almost certainly is not positioned to drive it (they flew, or are
-# on a trip elsewhere). Mirrors drive-planner's MAX_REASONABLE_DRIVE_SECONDS.
+# Above this a meeting drive is a road trip (owner, #377): planned only when
+# TripIt has no flight or train that gets him there, and the notice says the
+# drive was assumed. Under it, an ordinary meeting drive.
 DEFAULT_MAX_REASONABLE_DRIVE = timedelta(hours=3)
+# A routed drive past this is a missing booking, not a road trip.
+ROAD_TRIP_MAX = timedelta(hours=9)
+# A flight or train landing within this before the event (or leaving within
+# this after it) is how he gets there (or back).
+BOOKING_WINDOW = timedelta(hours=24)
+
+# A zero or at-most-one-minute route is not a useful calendar drive (#356).
+# Treat it as a definitive no-drive, so an earlier bogus block is not retained.
+MIN_MEETING_DRIVE = timedelta(minutes=1)
 
 # scan directions → unified meeting leg kinds (distinct so reconcile keys uniquely).
 _DIRECTION_KIND = {
@@ -140,6 +145,33 @@ def _trip_endpoints(leg, presence: TripPresence | None) -> tuple[str, str]:
 _UNKNOWABLE_REASONS = frozenset({"missing or unparseable time"})
 
 
+def booked_trips(schedule: list[dict] | None) -> list[tuple[datetime, datetime]]:
+    """(departure, arrival) of every timed TripIt Flight and Rail record."""
+    trips = []
+    for record in schedule or []:
+        if not isinstance(record, dict) or record.get("type") not in ("Flight", "Rail"):
+            continue
+        try:
+            start = datetime.fromisoformat(str(record.get("start")).replace("Z", "+00:00"))
+            end = datetime.fromisoformat(str(record.get("end")).replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        if start.tzinfo is not None and end.tzinfo is not None:
+            trips.append((start, end))
+    return trips
+
+
+def _booked(leg, booked: list[tuple[datetime, datetime]]) -> bool:
+    """A flight or train gets him to this leg's event, or away from it."""
+    if leg.direction == "return":
+        after = leg.depart_after
+        return after is not None and any(
+            after <= dep <= after + BOOKING_WINDOW for dep, _ in booked
+        )
+    by = leg.arrive_by
+    return by is not None and any(by - BOOKING_WINDOW <= arr <= by for _, arr in booked)
+
+
 def _legs_unknowable(meeting) -> bool:
     bucket = getattr(meeting, "bucket", None)
     return bucket == "past" or (
@@ -157,6 +189,12 @@ def _hold(skipped: list[str], held: list[HeldLeg], meeting, leg, kind: str, reas
             summary=f"Drive: {meeting.summary}",
             when=leg.arrive_by or leg.depart_after,
             reason=reason,
+            not_before=leg.depart_after
+            or (
+                leg.arrive_by - timedelta(seconds=leg.gap_seconds)
+                if isinstance(leg.gap_seconds, int) and leg.arrive_by is not None
+                else None
+            ),
         )
     )
 
@@ -168,15 +206,24 @@ def meeting_desired_blocks(
     max_reasonable_drive: timedelta = DEFAULT_MAX_REASONABLE_DRIVE,
     driving_to: dict[str, TripPresence] | None = None,
     display_tz: str | None = None,
+    booked: list[tuple[datetime, datetime]] | None = None,
+    prep_arrival: Mapping[str, datetime] | None = None,
+    prep_unavailable: frozenset[str] = frozenset(),
 ) -> tuple[list[DesiredBlock], list[str], list[HeldLeg]]:
     """Turn scan `MeetingClass` results into unified meeting `DesiredBlock`s.
 
     Only actionable meetings carry legs, so pass the scan output directly. Returns
     `(blocks, skipped_diagnostics, held)`. A leg is skipped (never blindly
-    blocked) when its anchor is unresolved, its route fails, or its routed drive
-    exceeds `max_reasonable_drive` (the travel-away suppression). Each of those
-    is also HELD (#334): the leg exists, so its current block is kept rather
-    than orphan-deleted. Only a leg whose origin is its destination is dropped.
+    blocked) when its anchor is unresolved or its route fails. Each of those is
+    also HELD (#334): the leg exists, so its current block is kept rather than
+    orphan-deleted. Only a leg whose origin is its destination is dropped.
+
+    A drive over `max_reasonable_drive` is a road trip (#377). With a `booked`
+    (departure, arrival) flight or train landing in the BOOKING_WINDOW before
+    the event, or leaving in the one after it, the leg is dropped: the airport
+    or station drives replace it. Without one it is planned and marked
+    `road_trip`, so the notice says the drive was assumed; past ROAD_TRIP_MAX
+    it is held as a missing booking instead.
 
     A leg whose origin IS its destination is skipped too (#301): the scan
     already filters a meeting held at the anchor, but the lodging rewrite below
@@ -208,14 +255,29 @@ def meeting_desired_blocks(
     meeting's own zone. A block written in the operator's zone is marked
     `zone_from_operator`, so an existing block in another zone converges to it
     on the next sweep (#309) while a fallback zone never triggers a re-patch.
+
+    `prep_arrival` maps a talk's meeting id to the start of its talk-prep Prep
+    hold (#381; read by `prep_window.prep_targets`). The talk's ARRIVING leg
+    (outbound or bridge) then arrives at the Prep start instead of the talk
+    start, and the block carries `prep_for` = the talk start for the notice.
+    A return leg never changes. A bridge leg retargets only when the drive also
+    fits before Prep; otherwise it keeps the talk-start target with a skipped
+    diagnostic, the one plan that can still be driven (Q1). Its `earliest_start`
+    stays the previous meeting's end. `prep_unavailable` are talks whose Prep
+    read failed: their arriving leg is HELD (#334), never re-targeted back to the
+    talk start on a provider blip.
     """
     presence = driving_to or {}
+    prep = prep_arrival or {}
     blocks: list[DesiredBlock] = []
     skipped: list[str] = []
     held: list[HeldLeg] = []
 
     for meeting in meetings:
-        if _legs_unknowable(meeting):
+        # Recorded attendance is positive no-anchor-drive evidence even for
+        # an ongoing/past event. Do not retain a phantom future return through
+        # the generic past-event hold; reconcile still preserves drive history.
+        if _legs_unknowable(meeting) and getattr(meeting, "attendance_id", None) is None:
             for kind in ("meeting_outbound", "meeting_return"):
                 held.append(
                     HeldLeg(
@@ -229,6 +291,7 @@ def meeting_desired_blocks(
                         ),
                         reason=f"meeting {meeting.meeting_id}: {meeting.reason}",
                         announce=False,
+                        not_before=meeting.end if kind == "meeting_return" else None,
                     )
                 )
             continue
@@ -257,15 +320,42 @@ def meeting_desired_blocks(
             if drive is None:
                 _hold(skipped, held, meeting, leg, kind, f"{tag}: route failed")
                 continue
-            if drive > max_reasonable_drive and meeting.meeting_id not in presence:
-                minutes = int(drive.total_seconds() // 60)
+            if drive < timedelta(0):
                 _hold(
                     skipped,
                     held,
                     meeting,
                     leg,
                     kind,
-                    f"{tag}: {minutes}min drive implausible — suppressed (away?)",
+                    f"{tag}: negative route duration — check route provider",
+                )
+                continue
+            if drive <= MIN_MEETING_DRIVE:
+                skipped.append(f"{tag}: route at or below one minute — no drive")
+                continue
+            road_trip = drive > max_reasonable_drive and meeting.meeting_id not in presence
+            if road_trip:
+                minutes = int(drive.total_seconds() // 60)
+                if _booked(leg, booked or []):
+                    skipped.append(
+                        f"{tag}: {minutes}min drive — a TripIt flight or train covers it"
+                    )
+                    continue
+                if drive > ROAD_TRIP_MAX:
+                    _hold(
+                        skipped,
+                        held,
+                        meeting,
+                        leg,
+                        kind,
+                        f"{tag}: {minutes}min drive and no flight or train in TripIt "
+                        "— a missing booking?",
+                    )
+                    continue
+
+            if leg.direction != "return" and meeting.meeting_id in prep_unavailable:
+                _hold(
+                    skipped, held, meeting, leg, kind, f"{tag}: talk-prep Prep window unavailable"
                 )
                 continue
 
@@ -285,6 +375,7 @@ def meeting_desired_blocks(
                 )
                 continue
 
+            prep_for: datetime | None = None
             if leg.direction == "return":
                 depart_after: datetime | None = leg.depart_after
                 if depart_after is None:
@@ -300,7 +391,22 @@ def meeting_desired_blocks(
                         skipped, held, meeting, leg, kind, f"{tag}: arrival leg missing arrive_by"
                     )
                     continue
-                start, end, anchor = arrive_by - drive, arrive_by, arrive_by
+                target = arrive_by
+                prep_start = prep.get(meeting.meeting_id)
+                if prep_start is not None and prep_start < arrive_by:
+                    # Arrive by the Prep start (#381). A bridge drive must still
+                    # leave after the previous meeting ends.
+                    if isinstance(gap, int) and drive > timedelta(seconds=gap) - (
+                        arrive_by - prep_start
+                    ):
+                        skipped.append(
+                            f"{tag}: {int(drive.total_seconds() // 60)}min drive from the "
+                            "previous meeting can't reach the talk-prep Prep start — "
+                            "arriving by the talk start"
+                        )
+                    else:
+                        target, prep_for = prep_start, arrive_by
+                start, end, anchor = target - drive, target, target
 
             blocks.append(
                 DesiredBlock(
@@ -315,7 +421,13 @@ def meeting_desired_blocks(
                     anchor=anchor,
                     timezone=display_tz or getattr(meeting, "timezone", None),
                     zone_from_operator=bool(display_tz),
-                    legacy_keys=frozenset({(GEN_LEGACY_DP, meeting.meeting_id, leg.direction)}),
+                    road_trip=road_trip,
+                    earliest_start=(
+                        leg.arrive_by - timedelta(seconds=gap)
+                        if isinstance(gap, int) and leg.arrive_by is not None
+                        else None
+                    ),
+                    prep_for=prep_for,
                 )
             )
 

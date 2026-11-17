@@ -84,6 +84,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from conference_attendance import Attendance, attendance_for
+
 # A meeting whose start is at or before `now` is in the past and is never
 # planned (lombot #28). A small grace window keeps a meeting that started a
 # minute ago — while the user is en route — out of the `past` bucket.
@@ -218,6 +220,7 @@ class MeetingClass:
     legs: tuple[TransitLeg, ...] = ()
     present_directions: tuple[str, ...] = ()
     timezone: str | None = None  # IANA tz of the meeting, for the block's CREATE
+    attendance_id: str | None = None  # explicit owner-planned presence (#356)
 
 
 @dataclass
@@ -234,6 +237,9 @@ class _Event:
     declined: bool  # the operator's own RSVP is "declined"
     cancelled: bool  # event-level status == "cancelled"
     timezone: str | None  # IANA name from start.timeZone, for the block's CREATE
+    attendance_id: str | None = None
+    attendance_location: str | None = None
+    attendance_scoped: bool = False
 
 
 def _normalize_location(location: object) -> str | None:
@@ -296,7 +302,7 @@ def _parse_iso(raw: object) -> datetime | None:
     return parsed
 
 
-def _self_declined(attendees: object) -> bool:
+def self_declined(attendees: object) -> bool:
     """True when the operator's own attendee entry RSVP'd `declined`.
 
     Google Calendar marks the operator's row with `self: true` and carries
@@ -440,7 +446,7 @@ def _parse_event(raw: object) -> _Event:
         end=end,
         all_day=start_all_day or end_all_day,
         marker=marker,
-        declined=_self_declined(raw.get("attendees")),
+        declined=self_declined(raw.get("attendees")),
         cancelled=raw.get("status") == "cancelled",
         timezone=_extract_timezone(raw.get("start")),
     )
@@ -577,8 +583,8 @@ def _is_routable_candidate(
 ) -> bool:
     """True when the event can act as a real-meeting neighbour for §5 #14/#7.
 
-    A routable candidate is a future, timed, in-person, non-block, non-flight
-    meeting with a usable location away from the anchor. Excluding past
+    A routable candidate is a future or ongoing confirmed-attendance, timed,
+    in-person, non-block, non-flight meeting away from the anchor. Excluding past
     meetings here is the fix for the cross of lombot #28 and #14/#7: a stale
     same-venue meeting must not turn a future meeting into back_to_back and
     strip its outbound-from-home leg. `end` is required too, so a half-parsed
@@ -598,7 +604,7 @@ def _is_routable_candidate(
         and event.end is not None
         and event.location is not None
         and not _is_virtual(event.location)
-        and not _is_past(event, now)
+        and (not _is_past(event, now) or (event.attendance_id is not None and event.end > now))
         and not _is_flight_event(event, flight_windows, scheduled_codes)
         and not _at_anchor(event, anchor_for)
     )
@@ -614,6 +620,9 @@ def scan(
     anchor_for: Callable[[datetime], tuple[str | None, str | None]] | None = None,
     flight_windows: list[tuple[datetime, datetime]] | None = None,
     flight_summaries: list[str] | None = None,
+    attendances: tuple[Attendance, ...] = (),
+    venue_near: frozenset[tuple[str, str]] = frozenset(),
+    return_anchor_for: Callable[[datetime], tuple[str | None, str | None]] | None = None,
 ) -> list[MeetingClass]:
     """Classify every event into a transit bucket.
 
@@ -643,6 +652,12 @@ def scan(
             and `anchor_note=note` so the caller surfaces them instead of
             routing from home. Defaults to a constant `(home_address, None)`
             — the pre-#122 behavior.
+        attendances: validated owner planner inputs from conference_attendance.
+            Exact labels and local dates suppress anchor legs, while real bridges
+            to/from outside venues remain. No summary/city inference.
+        return_anchor_for: optional end-time position resolver for version-2
+            occurrence timelines. Omitted, the published start-anchor behavior
+            remains unchanged. It grants no attendance or routing authority.
         flight_windows: known TripIt flight (start, end) UTC spans (#85). An
             event overlapping one is air travel — bucketed `filtered` and
             excluded as a routing neighbour, so a flight's airport location
@@ -685,6 +700,29 @@ def scan(
     windows = tuple(flight_windows or ())
     scheduled_codes = frozenset().union(*(flight_codes(s) for s in (flight_summaries or ())))
     parsed = [_parse_event(raw) for raw in events]
+    for raw, event in zip(events, parsed, strict=True):
+        # No fabricated/coerced identifier may turn a malformed event into an
+        # attendance observation. The ID still comes from the native projection.
+        identity = raw.get("id") if isinstance(raw, dict) else None
+        event.attendance_id = attendance_for(
+            attendances,
+            identity,
+            event.location,
+            event.start,
+            event.end,
+            near=venue_near,
+        )
+        event.attendance_location = next(
+            (
+                row.venue_location
+                for row in attendances
+                if row.id == event.attendance_id and row.schema_version == 2
+            ),
+            None,
+        )
+        event.attendance_scoped = any(
+            row.scopes_time(event.start) or row.scopes_time(event.end) for row in attendances
+        )
 
     # Pass 1: every meeting referenced by ANY planner marker is "handled"
     # (lombot #50 — ANY marker, not both directions). Record which
@@ -697,10 +735,11 @@ def scan(
 
     # Pass 2: order the genuine ground meetings by start so each can read its
     # neighbours (lombot #14/#7). Only routable candidates are linked — and
-    # crucially that EXCLUDES past meetings (lombot #28): an already-past
+    # crucially that EXCLUDES ended and unconfirmed past meetings (lombot #28): an already-past
     # same-venue meeting must never make a future meeting back_to_back and
     # strip its outbound-from-home leg. A non-candidate still gets classified,
-    # it just can't act as a neighbour.
+    # it just can't act as a neighbour. Ongoing grounded attendance still
+    # supplies the actual venue for a tight-gap outside appointment.
     candidates = [
         event
         for event in parsed
@@ -716,6 +755,7 @@ def scan(
                 event,
                 now=now,
                 anchor_for=anchor_for,
+                return_anchor_for=return_anchor_for,
                 skip_state=skip_state,
                 handled_directions=handled_directions,
                 candidates=candidates,
@@ -748,6 +788,7 @@ def _make_class(
         legs=legs,
         present_directions=present_directions,
         timezone=event.timezone,
+        attendance_id=event.attendance_id,
     )
 
 
@@ -756,6 +797,7 @@ def _classify(
     *,
     now: datetime,
     anchor_for: Callable[[datetime], tuple[str | None, str | None]],
+    return_anchor_for: Callable[[datetime], tuple[str | None, str | None]] | None,
     skip_state: dict[str, str],
     handled_directions: dict[str, list[str]],
     candidates: list[_Event],
@@ -833,6 +875,7 @@ def _classify(
     return _classify_transit(
         event,
         anchor_for=anchor_for,
+        return_anchor_for=return_anchor_for,
         candidates=candidates,
         order=order,
         tight_gap_seconds=tight_gap_seconds,
@@ -843,6 +886,7 @@ def _classify_transit(
     event: _Event,
     *,
     anchor_for: Callable[[datetime], tuple[str | None, str | None]],
+    return_anchor_for: Callable[[datetime], tuple[str | None, str | None]] | None,
     candidates: list[_Event],
     order: dict[int, int],
     tight_gap_seconds: int,
@@ -879,7 +923,9 @@ def _classify_transit(
     # --- inbound side: how do we get TO this meeting? ---
     prev_gap = _gap_seconds(prev_event, event)
     if prev_event is not None and prev_gap is not None and prev_gap <= tight_gap_seconds:
-        if _same_venue(prev_event.location, event.location):
+        if _same_venue(prev_event.location, event.location) or (
+            event.attendance_id is not None and event.attendance_id == prev_event.attendance_id
+        ):
             # Same venue, tight gap: you never left — no inbound leg.
             is_back_to_back = True
         else:
@@ -889,13 +935,13 @@ def _classify_transit(
             legs.append(
                 TransitLeg(
                     direction="bridge",
-                    origin=prev_event.location or anchor_address,
-                    destination=event.location or anchor_address,
+                    origin=prev_event.attendance_location or prev_event.location or anchor_address,
+                    destination=event.attendance_location or event.location or anchor_address,
                     arrive_by=event.start,
                     gap_seconds=prev_gap,
                 )
             )
-    else:
+    elif event.attendance_id is None:
         legs.append(
             TransitLeg(
                 direction="outbound",
@@ -912,18 +958,25 @@ def _classify_transit(
     # bridge leg in (lombot #14/#7) — either way you don't drive back.
     next_gap = _gap_seconds(event, next_event)
     skip_return = next_event is not None and next_gap is not None and next_gap <= tight_gap_seconds
-    if not skip_return:
+    if not skip_return and event.attendance_id is None:
+        return_address, return_note = (
+            return_anchor_for(event.end)
+            if return_anchor_for is not None and event.end is not None and event.attendance_scoped
+            else (anchor_address, anchor_note)
+        )
         legs.append(
             TransitLeg(
                 direction="return",
                 origin=event.location or anchor_address,
-                destination=anchor_address,
+                destination=return_address,
                 depart_after=event.end,
-                anchor_note=anchor_note if anchor_address is None else None,
+                anchor_note=return_note if return_address is None else None,
             )
         )
 
-    if is_bridge:
+    if event.attendance_id is not None and not is_bridge:
+        bucket, reason = "back_to_back", "on-site during recorded conference attendance — no drive"
+    elif is_bridge:
         bucket, reason = "bridge", "tight gap to a different venue"
     elif is_back_to_back:
         bucket, reason = "back_to_back", "tight gap to the same venue"
