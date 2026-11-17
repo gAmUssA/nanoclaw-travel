@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import sys
 import types
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -36,7 +37,12 @@ from airport_drive_inputs import airport_context  # noqa: E402
 from block_codec import GEN_UNIFIED, ParsedBlock  # noqa: E402
 from engine import AirportInfo, build_reconcile_plan  # noqa: E402
 from flight_identity import BYAIR, TRIPIT, Flight  # noqa: E402
-from lodging_source import KIND_OUTBOUND, KIND_RETURN, DriveTrip, lodging_desired_blocks  # noqa: E402
+from lodging_source import (  # noqa: E402
+    KIND_OUTBOUND,
+    KIND_RETURN,
+    DriveTrip,
+    lodging_desired_blocks,
+)
 from maps_client import TomTomClient, TravelTime  # noqa: E402
 from meeting_source import meeting_desired_blocks  # noqa: E402
 from reconcile import DesiredBlock, HeldLeg, plan_reconcile  # noqa: E402
@@ -377,6 +383,7 @@ def test_unplanned_lines_reach_the_rendered_notice():
         converted=0,
         deferred=0,
         errors=[],
+        skipped_creations=[],
     )
     payload = reconcile_sweep.build_sweep_payload(applied, [], [], ["Couldn't plan X: why"])
     assert payload["data"]["message"] == "Couldn't plan X: why"
@@ -457,6 +464,7 @@ def test_a_live_sweep_announces_a_drive_missing_for_an_hour(state_dir, monkeypat
         converted=0,
         deferred=0,
         errors=[],
+        skipped_creations=[],
     )
     leg = _held()
     messages = [
@@ -674,7 +682,10 @@ def test_tripits_copy_of_a_held_byair_flight_plans_nothing_beside_it():
         home_address=HOME,
         tripit_flights=[tripit],
     )
-    assert result.plan.creates == () and result.plan.deletes == ()
+    # The departure block is held under byAir's 15:00 key; TripIt's 14:55 copy
+    # writes no second departure. Its arrival has no block yet and plans.
+    assert [c.desired.kind for c in result.plan.creates] == ["airport_arrival"]
+    assert result.plan.deletes == ()
 
 
 def test_tripits_copy_plans_when_no_block_is_held_for_it():
@@ -697,3 +708,195 @@ def test_tripits_copy_plans_when_no_block_is_held_for_it():
         tripit_flights=[tripit],
     )
     assert result.plan.creates != ()
+
+
+# --- review round 4 (#337) ----------------------------------------------------
+
+
+def _status_flight(status, dep="BNA", arr="SFO", day=22):
+    return Flight(
+        dep_airport=dep,
+        arr_airport=arr,
+        scheduled_dep=datetime(2025, 10, day, 15, 0, tzinfo=UTC),
+        scheduled_arr=datetime(2025, 10, day, 19, 0, tzinfo=UTC),
+        source=BYAIR,
+        byair_flight_id=day,
+        status=status,
+    )
+
+
+def test_a_cancelled_flight_plans_no_drive():
+    result = _plan(
+        lambda o, d: timedelta(minutes=40), current=[], flights=[_status_flight("cancelled")]
+    )
+    assert result.plan.creates == ()
+
+
+def test_a_diverted_flight_plans_no_drive_from_its_booked_destination():
+    result = _plan(
+        lambda o, d: timedelta(minutes=40), current=[], flights=[_status_flight("diverted")]
+    )
+    assert [c.desired.kind for c in result.plan.creates] == ["airport_departure"]
+
+
+def test_an_unreadable_record_with_times_is_placed_at_an_unknown_airport():
+    record = {
+        **_byair_record("2025-10-22T15:00:00Z"),
+        "scheduled_arr_time": "2025-10-22T19:00:00Z",
+    }
+    flights = reconcile_sweep.normalize_flights([record], lambda _id: None)
+    (transport,) = flights.unplaced
+    assert (transport.origin, transport.destination) == (None, None)
+    assert flights.blind == ()
+
+
+def test_an_unreadable_record_is_kept_beside_a_nearby_tripit_flight():
+    """#337 review: a TripIt flight leaving within hours may be the next leg of
+    a connection; no time window alone proves it is the same flight."""
+    record = {
+        **_byair_record("2025-10-22T15:00:00Z"),
+        "scheduled_arr_time": "2025-10-22T17:00:00Z",
+    }
+    connection = Flight(
+        dep_airport="DEN",
+        arr_airport="SFO",
+        scheduled_dep=datetime(2025, 10, 22, 18, 0, tzinfo=UTC),
+        source=TRIPIT,
+        tripit_segment_id="seg-2",
+    )
+    (placed,) = reconcile_sweep.normalize_flights([record], lambda _id: None, [connection]).unplaced
+    assert placed.departs == datetime(2025, 10, 22, 15, 0, tzinfo=UTC)
+
+
+def test_an_unresolved_airport_id_falls_back_to_the_polled_code():
+    record = {
+        **_byair_record("2025-10-22T15:00:00Z"),
+        "scheduled_arr_time": "2025-10-22T19:00:00Z",
+        "last_snapshot": {"dep_airport_code": "bna", "arr_airport_code": "SFO"},
+    }
+    flights = reconcile_sweep.normalize_flights([record], lambda _id: None)
+    assert [(f.dep_airport, f.arr_airport) for f in flights.flights] == [("BNA", "SFO")]
+    assert (flights.unplaced, flights.blind) == ((), ())
+
+
+def test_a_cancellation_with_no_route_fails_the_sweep_closed():
+    """It could not take TripIt's copy with it, and that copy would move him on
+    a flight byAir says never left."""
+    record = {
+        **_byair_record("2025-10-22T15:00:00Z"),
+        "last_snapshot": {"computed_status": "cancelled"},
+    }
+    flights = reconcile_sweep.normalize_flights([record], lambda _id: None)
+    with pytest.raises(reconcile_sweep.FlightsUnplaceable, match="cancelled"):
+        reconcile_sweep.require_placeable(flights)
+
+
+def test_a_record_with_no_readable_times_fails_the_sweep_closed():
+    flights = reconcile_sweep.normalize_flights([_byair_record(None)], lambda _id: None)
+    with pytest.raises(reconcile_sweep.FlightsUnplaceable, match="fix or remove"):
+        reconcile_sweep.require_placeable(flights)
+
+
+def test_a_polled_code_stands_in_for_an_airport_the_resolver_cannot_resolve():
+    """#337 review: the production resolver raises rather than returning None;
+    byAir's polled code still places the flight."""
+
+    def resolve(_airport_id):
+        raise reconcile_sweep.AirportUnresolved("no usable IATA")
+
+    record = {
+        **_byair_record("2025-10-22T15:00:00Z"),
+        "dep_airport_id": 1,
+        "arr_airport_id": 2,
+        "scheduled_arr_time": "2025-10-22T19:00:00Z",
+        "last_snapshot": {"dep_airport_code": "BNA", "arr_airport_code": "SFO"},
+    }
+    flights = reconcile_sweep.normalize_flights([record], resolve)
+    assert [(f.dep_airport, f.arr_airport) for f in flights.flights] == [("BNA", "SFO")]
+
+
+def test_an_unresolvable_airport_with_no_polled_code_still_fails_the_sweep():
+    def resolve(_airport_id):
+        raise reconcile_sweep.AirportUnresolved("no usable IATA")
+
+    record = {**_byair_record("2025-10-22T15:00:00Z"), "dep_airport_id": 1, "arr_airport_id": 2}
+    with pytest.raises(reconcile_sweep.AirportUnresolved):
+        reconcile_sweep.normalize_flights([record], resolve)
+
+
+def test_a_delay_past_the_booked_arrival_with_no_live_arrival_fails_the_sweep():
+    """#337 review: booked 15:00-19:00, departing 20:00 live with no live
+    arrival. Accepted, it would vanish from the itinerary and TripIt's booked
+    copy would land him at 19:00."""
+    record = {
+        **_byair_record("2025-10-22T15:00:00Z"),
+        "scheduled_arr_time": "2025-10-22T19:00:00Z",
+        "last_snapshot": {
+            "dep_airport_code": "BNA",
+            "arr_airport_code": "SFO",
+            "dep_time": "2025-10-22T20:00:00Z",
+        },
+    }
+    flights = reconcile_sweep.normalize_flights([record], lambda _id: None)
+    assert flights.flights == []
+    with pytest.raises(reconcile_sweep.FlightsUnplaceable):
+        reconcile_sweep.require_placeable(flights)
+
+
+@pytest.mark.parametrize("kind", ["airport_arrival", "airport_transfer"])
+def test_airport_failed_hold_uses_actual_depart_after_or_window_start(kind):
+    flights = [replace(_flight(), trip_id=99)]
+    info = _info(
+        BNA=(36.12, -86.68), SFO=(37.62, -122.38), OAK=(37.72, -122.22), LAX=(33.94, -118.4)
+    )
+    if kind == "airport_transfer":
+        flights.append(
+            Flight(
+                dep_airport="OAK",
+                arr_airport="LAX",
+                scheduled_dep=datetime(2025, 10, 22, 22, tzinfo=UTC),
+                scheduled_arr=datetime(2025, 10, 23, 0, tzinfo=UTC),
+                source=BYAIR,
+                byair_flight_id=2,
+                trip_id=99,
+            )
+        )
+    planned = _plan(lambda *_: timedelta(minutes=40), current=[], flights=flights, info=info)
+    wanted = next(item.desired for item in planned.plan.creates if item.desired.kind == kind)
+    failed = _plan(lambda *_: None, current=[], flights=flights, info=info)
+    hold = next(item for item in failed.held if item.kind == kind)
+    assert hold.not_before == (
+        wanted.earliest_start if kind == "airport_transfer" else wanted.start
+    )
+
+
+def test_lodging_failed_return_hold_keeps_known_depart_after():
+    trip = _trip()
+    _, _, _, held = lodging_desired_blocks(
+        [trip], route=lambda *_: None, home_address=HOME, verdicts={}, now=NOW
+    )
+    returned = next(item for item in held if item.kind == KIND_RETURN)
+    assert returned.not_before == trip.check_out
+
+
+def test_unreadable_flight_hold_uses_retained_native_start():
+    from block_codec import parse_block
+    from calendar_apply import build_create_args
+
+    desired = DesiredBlock(
+        "flight",
+        "airport_arrival",
+        "Drive",
+        NOW + timedelta(hours=5),
+        NOW + timedelta(hours=6),
+        "Airport",
+        "Home",
+        3600,
+        NOW + timedelta(hours=5),
+    )
+    current = parse_block(
+        {"id": "native-arrival", **build_create_args(desired, calendar_id="primary")}
+    )
+    assert current is not None
+    held = reconcile_sweep._unreadable_flight_holds([("unreadable", None)], [current])
+    assert len(held) == 1 and held[0].not_before == desired.start

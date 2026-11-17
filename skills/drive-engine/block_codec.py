@@ -1,7 +1,6 @@
 """Unified drive-block codec — machine-state writer and multi-shape reader.
 
-One codec for every drive block the engine writes, replacing the two legacy codecs
-(flight-assist `<!--fadrive:-->` and drive-planner `<!--dp:-->`).
+One codec for every drive block the engine writes.
 
 Where the machine state lives
 -----------------------------
@@ -22,17 +21,13 @@ the designator:
 so a codeshare tracked under two designators still maps to one block. `kind`
 disambiguates the departure vs arrival block on the same flight.
 
-Multi-shape reader (#156 R4 cutover): `parse_block` reads the current unified state
-from `extendedProperties.private` AND recognizes both legacy description shapes,
-tagging each with its generation so the reconcile can converge prior-gen blocks
-(adopt-under-new-identity + delete legacy) and delete orphans, never double-stamp.
+`parse_block` reads the unified state from `extendedProperties.private`.
 Malformed / unrecognized events parse to None (never raise), so one bad event
 cannot abort a sweep.
 """
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 
@@ -45,8 +40,28 @@ from leg_anchor import ConcreteLeg
 UNIFIED_BLOCK_SCHEMA_VERSION = 1
 
 GEN_UNIFIED = "unified"
-GEN_LEGACY_FADRIVE = "legacy_fadrive"
-GEN_LEGACY_DP = "legacy_dp"
+EV_PRESENTATION_PREFIX = "EV planning: "
+
+
+def human_description(origin: str, destination: str, charging_note: str | None = None) -> str:
+    """Existing Calendar description string; presentation, never vehicle authority."""
+    route = f"{origin} → {destination}"
+    return route if charging_note is None else f"{route}\n{EV_PRESENTATION_PREFIX}{charging_note}"
+
+
+def parse_ev_note(description: object, origin: object, destination: object) -> str | None:
+    """Only the optional final line after the complete exact route is an EV note."""
+    if not all(isinstance(value, str) for value in (description, origin, destination)):
+        return None
+    assert isinstance(description, str)
+    prefix = f"{origin} → {destination}\n{EV_PRESENTATION_PREFIX}"
+    if not description.startswith(prefix):
+        return None
+    note = description[len(prefix) :]
+    if not note or note != note.strip() or "\n" in note or "\r" in note:
+        return None
+    return note
+
 
 # --- alert values -----------------------------------------------------------
 
@@ -72,15 +87,6 @@ _EXT_KEY_WINDOW_END = "dengine_we"
 _EXT_KEY_ORIGIN = "dengine_o"
 _EXT_KEY_DESTINATION = "dengine_d"
 _EXT_KEY_ALERTED = "dengine_al"
-
-# --- legacy markers (read-only, for cutover convergence) --------------------
-
-_LEGACY_FADRIVE_MARKER_RE = re.compile(
-    r"\[flight-assist:flight=(?P<id>[^:\]]+):dir=(?P<dir>[^:\]]+)\]"
-)
-_LEGACY_FADRIVE_STATE_RE = re.compile(r"<!--fadrive:(?P<json>\{.*?\})-->", re.DOTALL)
-_LEGACY_DP_MARKER_RE = re.compile(r"\[drive-planner:meeting=(?P<id>[^:\]]+):dir=(?P<dir>[^:\]]+)\]")
-_LEGACY_DP_STATE_RE = re.compile(r"<!--dp:(?P<json>\{.*?\})-->", re.DOTALL)
 
 
 # --- leg identity -----------------------------------------------------------
@@ -173,26 +179,20 @@ def build_extended_properties(
     return {"private": private}
 
 
-# --- parse (extendedProperties + legacy-description reader) ------------------
+# --- parse (extendedProperties reader) ------------------
 
 
 @dataclass(frozen=True)
 class ParsedBlock:
     """A drive block read off a calendar event, tagged with its generation.
 
-    `generation` is `unified` for a new block, or a legacy tag the cutover
-    reconcile uses to converge/delete. For unified blocks, `identity` + `kind`
-    carry the leg identity and the state fields are populated. For legacy blocks,
-    `legacy_id` + `legacy_direction` carry the old marker's identity so reconcile
-    can match or orphan them; their state fields are best-effort.
+    `identity` + `kind` carry the leg identity and the state fields are populated.
     """
 
     generation: str
     event_id: str | None = None
     identity: str | None = None
     kind: str | None = None
-    legacy_id: str | None = None
-    legacy_direction: str | None = None
     baseline_seconds: int | None = None
     anchor: datetime | None = None
     window_end: datetime | None = None
@@ -202,6 +202,12 @@ class ParsedBlock:
     # The event's own `start.timeZone`, read for unified blocks only (#309): the
     # zone the block is displayed in, which reconcile compares to the operator's.
     timezone: str | None = None
+    # Existing native Calendar presentation, not a new private state field.
+    # Compare EV renders independently of traffic baseline jitter.
+    description: str | None = field(default=None, compare=False)
+    duration_seconds: int | None = field(default=None, compare=False)
+    start: datetime | None = field(default=None, compare=False)
+    end: datetime | None = field(default=None, compare=False)
 
 
 def _event_start_timezone(event: object) -> str | None:
@@ -264,11 +270,10 @@ def _event_extended_private(event: object) -> dict | None:
 
 
 def _parse_extended_block(private: dict, event_id: str | None) -> ParsedBlock | None:
-    """Read a unified block off `extendedProperties.private`, or None to fall back.
+    """Read a unified block off `extendedProperties.private`, or None.
 
     Returns None when the map carries no current-version `dengine_*` state or lacks
-    a usable leg identity — the caller then tries the two legacy description readers
-    (fadrive / dp). A version other than the current one reads as "no unified state
+    a usable leg identity. A version other than the current one reads as "no unified state
     here" and returns None too; the writer and reader ship together, so a mismatch
     is only a transient rollout artifact that the next same-version sweep rewrites.
     """
@@ -294,14 +299,26 @@ def _parse_extended_block(private: dict, event_id: str | None) -> ParsedBlock | 
     )
 
 
-def parse_block(event: object) -> ParsedBlock | None:
-    """Read a drive block off a calendar event; extendedProperties + legacy (#178, R4).
+def event_bounds(event: object) -> tuple[datetime, datetime] | None:
+    """Complete positive timed Calendar bounds, without guessing a timezone."""
+    if not isinstance(event, dict):
+        return None
+    values = []
+    for name in ("start", "end"):
+        bound = event.get(name)
+        instant = _parse_dt(bound.get("dateTime")) if isinstance(bound, dict) else None
+        if instant is None or instant.tzinfo is None:
+            return None
+        values.append(instant)
+    seconds = int((values[1] - values[0]).total_seconds())
+    return (values[0], values[1]) if seconds > 0 else None
 
-    Reads the current unified state from `extendedProperties.private` (the #178
-    migration target), falling back to the two legacy description markers. Returns a
-    ParsedBlock tagged with its generation, or None for an event that carries no
-    unified extended-properties state AND neither legacy description marker (or is
-    malformed). Never raises — a single bad event must not abort a sweep.
+
+def parse_block(event: object) -> ParsedBlock | None:
+    """Read a drive block off a calendar event's `extendedProperties.private` (#178).
+
+    Returns None for an event with no unified state or a malformed one. Never
+    raises — a single bad event must not abort a sweep.
     """
     eid = _event_id(event)
 
@@ -309,28 +326,14 @@ def parse_block(event: object) -> ParsedBlock | None:
     if private is not None:
         extended = _parse_extended_block(private, eid)
         if extended is not None:
-            return replace(extended, timezone=_event_start_timezone(event))
-
-    desc = _event_description(event)
-    if desc is None:
-        return None
-
-    fadrive = _LEGACY_FADRIVE_MARKER_RE.search(desc)
-    if fadrive and _LEGACY_FADRIVE_STATE_RE.search(desc):
-        return ParsedBlock(
-            generation=GEN_LEGACY_FADRIVE,
-            event_id=eid,
-            legacy_id=fadrive["id"],
-            legacy_direction=fadrive["dir"],
-        )
-
-    dp = _LEGACY_DP_MARKER_RE.search(desc)
-    if dp and _LEGACY_DP_STATE_RE.search(desc):
-        return ParsedBlock(
-            generation=GEN_LEGACY_DP,
-            event_id=eid,
-            legacy_id=dp["id"],
-            legacy_direction=dp["dir"],
-        )
+            bounds = event_bounds(event)
+            return replace(
+                extended,
+                timezone=_event_start_timezone(event),
+                description=_event_description(event),
+                duration_seconds=int((bounds[1] - bounds[0]).total_seconds()) if bounds else None,
+                start=bounds[0] if bounds else None,
+                end=bounds[1] if bounds else None,
+            )
 
     return None

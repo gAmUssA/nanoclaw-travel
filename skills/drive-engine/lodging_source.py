@@ -78,10 +78,10 @@ RouteFn = Callable[[str, str], "timedelta | None"]
 # The drive-or-fly bands, read off the routed home→lodging drive.
 #
 # NOT to be merged with `meeting_source.DEFAULT_MAX_REASONABLE_DRIVE`, which is
-# also three hours and means the opposite thing: there, a drive that long is
-# evidence the operator is somewhere else entirely and the leg is suppressed as
-# implausible. Here it is the ceiling under which a drive is unremarkable. Same
-# number, opposite conclusion — they drift apart independently.
+# also three hours and means something else: there, a longer meeting drive is a
+# road trip, planned only when TripIt has no flight or train for it (#377).
+# Here it is the ceiling under which a drive is unremarkable. Same number,
+# different rules — they drift apart independently.
 DRIVE_CERTAIN_MAX = timedelta(hours=3)
 DRIVE_IMPLAUSIBLE_MIN = timedelta(hours=7)
 
@@ -685,7 +685,14 @@ def lodging_desired_blocks(
             else f"Drive: {trip.hotel} → home"
         )
         held.append(
-            HeldLeg(identity=trip.key, kind=kind, summary=summary, when=when, reason=reason)
+            HeldLeg(
+                identity=trip.key,
+                kind=kind,
+                summary=summary,
+                when=when,
+                reason=reason,
+                not_before=when if kind == KIND_RETURN else None,
+            )
         )
 
     def hold_absorbed(trip: DriveTrip, local: LocalLeg, reason: str) -> None:
@@ -701,6 +708,7 @@ def lodging_desired_blocks(
                 when=local.start,
                 reason=f"{reason} — its outer legs may absorb this drive",
                 announce=False,
+                not_before=local.start,
             )
         )
 
@@ -713,7 +721,9 @@ def lodging_desired_blocks(
             skipped.append(f"{reason} — flying, nothing held")
             return
         ctx = contexts.get(trip.key, TripContext())
-        for local in (ctx.first_out, ctx.last_back):
+        # Only a local drive an outer leg can absorb: the first one out, and
+        # the last one back only once the room is released.
+        for local in (ctx.first_out, _released_return(trip, ctx)):
             if local is not None:
                 hold_absorbed(trip, local, reason)
         skipped.append(reason)
@@ -733,6 +743,7 @@ def lodging_desired_blocks(
                 summary=f"Drive: {trip.hotel} → home",
                 when=_return_anchor(trip, ctx),
                 reason=reason,
+                not_before=_return_anchor(trip, ctx),
             )
         )
 

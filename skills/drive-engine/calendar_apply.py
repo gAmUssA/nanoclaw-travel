@@ -1,16 +1,13 @@
 """Apply a reconcile plan to the calendar — the engine's WRITE path.
 
 Executes a `ReconcilePlan` against a Google Calendar client: deletes orphans,
-creates new drive blocks, converts prior-gen blocks (create new + delete legacy),
-and shifts changed blocks with an in-place PATCH. This is what makes the engine
-authoritative instead of merely observant.
+creates new drive blocks and shifts changed blocks with an in-place PATCH. This is
+what makes the engine authoritative instead of merely observant.
 
 A shift is a single atomic PATCH of the same event — never a recreate-then-delete
 — so a sweep killed mid-write can't leave the new block next to an undeleted old
-one (the #164 duplicate storm). A convert still CREATES the unified replacement
-before deleting the legacy event(s) (they are distinct events), rolling the
-replacement back if a legacy delete fails; a delete that 404s (already gone) is an
-idempotent success. The whole write phase is bounded by a wall-clock budget so it
+one (the #164 duplicate storm). A delete that 404s (already gone) is an idempotent
+success. The whole write phase is bounded by a wall-clock budget so it
 returns a clean payload under the host precheck timeout, deferring the rest to the
 next (idempotent) sweep instead of being killed mid-write (#164).
 
@@ -38,7 +35,12 @@ if str(_BUNDLE_DIR) not in sys.path:
     sys.path.insert(0, str(_BUNDLE_DIR))
 
 from block_codec import build_extended_properties  # noqa: E402
-from reconcile import DesiredBlock, ReconcilePlan, material_update_delta  # noqa: E402
+from reconcile import (  # noqa: E402
+    DEPART_AFTER_KINDS,
+    DesiredBlock,
+    ReconcilePlan,
+    material_update_delta,
+)
 
 # A drive block's human summary is "Drive: <meeting/leg>". Stripping the prefix
 # recovers the name the operator recognizes for a notification.
@@ -69,9 +71,9 @@ class ApplyResult:
     created: int = 0
     updated: int = 0
     deleted: int = 0
-    converted: int = 0
     deferred: int = 0
     errors: list[str] = field(default_factory=list)
+    skipped_creations: list[str] = field(default_factory=list)
     # Operator-facing notification material, recorded ONLY for ops that actually
     # applied this sweep (never for deferred / failed ones). Per-leg here; the
     # sweep payload builder groups them per meeting. `added_meeting_legs` holds
@@ -82,7 +84,7 @@ class ApplyResult:
 
     @property
     def total_writes(self) -> int:
-        return self.created + self.updated + self.deleted + self.converted
+        return self.created + self.updated + self.deleted
 
 
 def _meeting_name(summary: str) -> str:
@@ -97,6 +99,17 @@ def _local_when(desired: DesiredBlock) -> str:
     e.g. "Sat Jul 18, 10:35" — what the operator sees for "... at 10:35"."""
     local_dt, _ = _start_in_local(desired.anchor, desired.timezone)
     return local_dt.strftime("%a %b %d, %H:%M")
+
+
+def _prep_note(desired: DesiredBlock, entry: dict) -> None:
+    """Record the talk's own start on a drive that arrives at its Prep hold (#381).
+
+    The notice's "at HH:MM" is the anchor, which is then the Prep start; without
+    the talk time it reads as if the talk itself moved.
+    """
+    if desired.prep_for is not None:
+        local_dt, _ = _start_in_local(desired.prep_for, desired.timezone)
+        entry["talk"] = local_dt.strftime("%H:%M")
 
 
 def _start_in_local(start: datetime, tz_name: str | None) -> tuple[datetime, str]:
@@ -122,8 +135,8 @@ def build_create_args(desired: DesiredBlock, *, calendar_id: str) -> dict:
     The block is rendered in its local timezone (`desired.timezone`) so it shows
     the correct local time. Machine state (leg identity + the fields the recheck
     reads back) rides in `extendedProperties.private`, a machine-only field, and
-    the `description` carries only the operator-facing route line (#178 writer
-    flip). It squatted in the description only because the retired Composio toolkit
+    the `description` carries operator-facing route and optional EV allowance (#178
+    writer flip). State squatted in the description only because the retired Composio toolkit
     exposed no writable `extendedProperties`; the native API does, and the reader
     has read both since the dual-read step, so a block written this way round-trips
     and a still-description-carried block created before the flip is read by the
@@ -167,7 +180,9 @@ def _human_description(desired: DesiredBlock) -> str:
     (the meeting/flight name) and the `location` (the destination) with the one
     detail neither shows — where the drive starts.
     """
-    return f"{desired.origin} → {desired.destination}"
+    from block_codec import human_description
+
+    return human_description(desired.origin, desired.destination, desired.charging_note)
 
 
 def _desired_extended_properties(desired: DesiredBlock) -> dict:
@@ -254,21 +269,21 @@ def apply_plan(
     budget_seconds: float | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     now: datetime | None = None,
+    creation_clock: Callable[[], datetime] | None = None,
 ) -> ApplyResult:
     """Execute a reconcile plan against the calendar. Returns applied counts.
 
-    Order: updates, creates, converts, then deletes. Desired-state corrections
+    Order: updates, creates, then deletes. Desired-state corrections
     take the bounded write budget before duplicate/orphan cleanup.
 
     Updates are an in-place PATCH of the same event, so an update can never leave
     a duplicate even if the sweep is killed the instant after — the recreate-then-
-    delete that produced the #164 storm is gone. Converts (adopting a legacy event
-    into a unified one — two distinct events) still create-then-delete atomically.
+    delete that produced the #164 storm is gone.
 
     `budget_seconds` bounds the wall-clock spent on writes so the sweep returns a
     clean payload instead of being killed mid-write past the host precheck timeout
     (#164). Each write UNIT is atomic — the budget is checked BEFORE starting one,
-    never mid-unit — so bounding never splits a create/patch/convert. Ops not
+    never mid-unit — so bounding never splits a create or patch. Ops not
     started this sweep are counted in `deferred` and drained on the next sweep.
     The reconcile is idempotent, so resuming never duplicates. `monotonic` is
     injected for deterministic tests.
@@ -278,8 +293,14 @@ def apply_plan(
     silently. It is separate from `monotonic`, which measures only elapsed write
     time and cannot answer "how far away is this drive"; injected for the same
     determinism reason, defaulting to the real clock.
+
+    `creation_clock` is checked immediately before each new block or legacy
+    replacement. A start that passed during planning or earlier writes is
+    skipped without creating a backdated event or deleting its legacy source.
+    Existing blocks may still be patched; the alert cycle clock remains `now`.
     """
     result = ApplyResult()
+    creation_clock = creation_clock or (lambda: datetime.now(UTC))
     now = now or datetime.now(UTC)
     deadline = monotonic() + budget_seconds if budget_seconds is not None else None
 
@@ -307,8 +328,12 @@ def apply_plan(
         # Alert only on a MATERIAL drive-time change (a swing worth acting on, on
         # a drive near enough to act on); everything else patches silently.
         delta = material_update_delta(
-            u.prior_baseline_seconds,
-            u.desired.baseline_seconds,
+            u.prior_effective_seconds
+            if u.prior_effective_seconds is not None
+            else u.prior_baseline_seconds,
+            int((u.desired.end - u.desired.start).total_seconds())
+            if u.prior_effective_seconds is not None
+            else u.desired.baseline_seconds,
             starts_at=u.desired.start,
             now=now,
         )
@@ -324,8 +349,24 @@ def apply_plan(
                     "anchor": u.desired.anchor.isoformat(),
                 }
             )
+            _prep_note(u.desired, result.material_updates[-1])
+            if u.prior_effective_seconds is not None:
+                after = u.desired.kind in DEPART_AFTER_KINDS
+                result.material_updates[-1]["timing"] = "arrival" if after else "departure"
+                if after:
+                    result.material_updates[-1]["direction"] = (
+                        "later" if direction == "sooner" else "sooner"
+                    )
+            if u.desired.charging_note is not None:
+                side = "Return" if u.desired.kind in DEPART_AFTER_KINDS else "Outbound"
+                result.material_updates[-1]["charging"] = f"{side}: {u.desired.charging_note}"
 
     for c in plan.creates:
+        if c.desired.start < creation_clock():
+            result.skipped_creations.append(
+                f"{c.desired.kind} {c.desired.identity}: start already past"
+            )
+            continue
         if over_budget():
             result.deferred += 1
             continue
@@ -346,29 +387,12 @@ def apply_plan(
                     "anchor": c.desired.anchor.isoformat(),
                 }
             )
-
-    for cv in plan.converts:
-        if over_budget():
-            result.deferred += 1
-            continue
-        try:
-            created = calendar.create_event(build_create_args(cv.desired, calendar_id=calendar_id))
-        except _WRITE_ERRORS as exc:
-            result.errors.append(f"convert-create {cv.desired.identity}: {exc}")
-            continue
-        # Delete EVERY legacy event (list comp — no short-circuit, so a mid-list
-        # failure doesn't skip the rest). Only count the convert when all legacy
-        # blocks are gone; if any survived, the new block would duplicate it, so
-        # roll the replacement back (same treatment as a failed update delete).
-        deletes_ok = [
-            _delete(calendar, calendar_id=calendar_id, event_id=event_id, result=result)
-            for event_id in cv.legacy_event_ids
-        ]
-        if all(deletes_ok):
-            result.converted += 1
-        else:
-            new_id = _created_id(created)
-            _delete(calendar, calendar_id=calendar_id, event_id=new_id, result=result)
+            _prep_note(c.desired, result.added_meeting_legs[-1])
+            if c.desired.charging_note is not None:
+                side = "Return" if c.desired.kind in DEPART_AFTER_KINDS else "Outbound"
+                result.added_meeting_legs[-1]["charging"] = f"{side}: {c.desired.charging_note}"
+            if c.desired.road_trip:
+                result.added_meeting_legs[-1]["road_trip"] = True
 
     for d in plan.deletes:
         if over_budget():

@@ -13,9 +13,9 @@ import json
 import subprocess
 import sys
 import urllib.error
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -26,6 +26,9 @@ sys.path.insert(0, str(REPO_ROOT / "skills" / "flight-assist"))
 sys.path.insert(0, str(REPO_ROOT / "skills" / "travel-core"))
 
 import precheck  # noqa: E402
+
+# Insert the shipped bundle path before importing its delivery module.
+from notification_delivery import notification_store  # noqa: E402
 from operator_tz import OperatorTz  # noqa: E402
 from state import (  # noqa: E402
     CURRENT_LOCATION_FILE,
@@ -33,6 +36,7 @@ from state import (  # noqa: E402
     StateError,
     read_flight_state,
     write_active_flights,
+    write_config,
     write_flight_state,
 )
 
@@ -335,6 +339,22 @@ def test_no_active_flights_yields_no_events(state_root: Path):
     assert events == []
 
 
+def test_optional_invalid_ev_preferences_do_not_stop_flight_alert_polling(state_root: Path):
+    write_active_flights([12345])
+    write_config({"home_address": "Home"})
+    path = state_root / "config.json"
+    payload = json.loads(path.read_text())
+    payload["ev_planning"] = {"schema_version": 99}
+    path.write_text(json.dumps(payload))
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _byair_flight(flight_id=12345)
+        events = precheck._run_cycle(
+            now_utc=datetime(2026, 5, 18, 16, tzinfo=UTC), operator_tz_reader=lambda: None
+        )
+    assert client.return_value.get_flight.call_count == 1
+    assert "day_before" in [event["event"]["reason"] for event in events]
+
+
 def test_run_cycle_passes_bounded_per_call_timeout_to_byair_client(state_root: Path):
     """`_run_cycle` must instantiate ByAirClient with the bounded per-call timeout.
 
@@ -347,7 +367,7 @@ def test_run_cycle_passes_bounded_per_call_timeout_to_byair_client(state_root: P
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
         precheck._run_cycle(now_utc=datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC))
     mock_byair_from_env.assert_called_once_with(timeout=precheck._BYAIR_CALL_TIMEOUT_SECONDS)
-    assert precheck._BYAIR_CALL_TIMEOUT_SECONDS == 8.0
+    assert precheck._BYAIR_CALL_TIMEOUT_SECONDS == 6.0
 
 
 def test_run_cycle_passes_bounded_per_call_timeout_to_maps_client(state_root: Path, monkeypatch):
@@ -363,7 +383,8 @@ def test_run_cycle_passes_bounded_per_call_timeout_to_maps_client(state_root: Pa
     monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "synthetic-key")
     with patch("precheck.MapsClient.from_env") as mock_maps_from_env:
         precheck._run_cycle(now_utc=datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC))
-    mock_maps_from_env.assert_called_once_with(timeout=precheck._MAPS_CALL_TIMEOUT_SECONDS)
+    mock_maps_from_env.assert_called_once_with(timeout=precheck._MAPS_HTTP_CALL_TIMEOUT_SECONDS)
+    assert precheck._MAPS_HTTP_CALL_TIMEOUT_SECONDS == 2.0
     assert precheck._MAPS_CALL_TIMEOUT_SECONDS == 8.0
 
 
@@ -725,9 +746,21 @@ def test_gate_assignment_readout_fires_in_window(state_root: Path):
     assert by_reason["gate_assignment"]["dep_gate"] == "D6"
     assert by_reason["gate_assignment"]["dep_terminal"] == "1"
     assert "gate_change" not in by_reason  # muted on the readout cycle
-    # Marker persisted so the next gate move surfaces as gate_change.
+    # A wake alone is not delivery. The next gate change is released only
+    # after this exact notice has a confirmed send acknowledgement.
     persisted = must(read_flight_state(12345))
-    assert persisted["phase_markers"]["gate_assignment_fired"] is True
+    assert persisted["phase_markers"]["gate_assignment_fired"] is False
+    notice = next(e for e in events if e["event"]["reason"] == "gate_assignment")
+    with notification_store(now_utc=fake_now) as delivery:
+        assert delivery.confirm([notice["notification_id"]])["stale"] == []
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _byair_flight(
+            flight_id=12345, dep_gate="D7", dep_terminal="1"
+        )
+        later = precheck._run_cycle(now_utc=fake_now + timedelta(minutes=10))
+    assert any(e["event"]["reason"] == "gate_change" for e in later)
+    assert not any(e["event"]["reason"] == "gate_assignment" for e in later)
+    assert must(read_flight_state(12345))["phase_markers"]["gate_assignment_fired"] is True
 
 
 def test_gate_assignment_window_resolves_widebody_lead_from_snapshot(state_root: Path):
@@ -1028,7 +1061,21 @@ def test_seeded_state_with_no_snapshot_forces_poll(state_root: Path):
     assert "day_before" in reasons
     persisted = must(read_flight_state(12345))
     assert persisted["last_snapshot"] is not None
-    assert persisted["phase_markers"]["day_before_fired"] is True
+    assert persisted["phase_markers"]["day_before_fired"] is False
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = fake_flight
+        retried = precheck._run_cycle(
+            now_utc=fake_now + timedelta(minutes=5), operator_tz_reader=_CountingReader(_CHICAGO)
+        )
+        assert client.return_value.get_flight.call_count == 1
+    retry = next(e for e in retried if e["event"]["reason"] == "day_before")
+    with notification_store(now_utc=fake_now + timedelta(minutes=5)) as delivery:
+        delivery.confirm([retry["notification_id"]])
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = fake_flight
+        after_ack = precheck._run_cycle(now_utc=fake_now + timedelta(minutes=35))
+    assert _day_before_events(after_ack) == []
+    assert must(read_flight_state(12345))["phase_markers"]["day_before_fired"] is True
 
 
 def test_wall_clock_budget_defers_remaining_slow_flights(state_root: Path):
@@ -1119,7 +1166,7 @@ def test_cycle_with_every_day_before_fired_keeps_the_full_poll_budget(state_root
 
 def test_flight_that_may_spawn_the_reader_starts_before_the_reserve(state_root: Path):
     """A first-seen flight may fire day_before and spawn the reader, so it must
-    start before the budget minus the reserve. At t=6 it is past that line and
+    start before the budget minus the reserve. At that deadline it
     defers to the next cycle rather than risk outliving the kill."""
     _fired_flight(1)
     write_active_flights([1, 99])
@@ -1127,7 +1174,9 @@ def test_flight_that_may_spawn_the_reader_starts_before_the_reserve(state_root: 
     reader = _CountingReader(_CHICAGO)
     fake_now = datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC)
     with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
-        mock_byair_from_env.return_value.get_flight.side_effect = _timed_poll(clock, 6.0)
+        mock_byair_from_env.return_value.get_flight.side_effect = _timed_poll(
+            clock, precheck._CYCLE_WALL_CLOCK_BUDGET_SECONDS - precheck._READER_RESERVE_SECONDS
+        )
         precheck._run_cycle(
             now_utc=fake_now, monotonic=lambda: clock["t"], operator_tz_reader=reader
         )
@@ -1421,7 +1470,7 @@ def test_script_safe_shape_on_byair_misconfig(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_connection_risk_pass_fires_and_persists_marker(state_root: Path):
+def test_connection_risk_pass_queues_without_claiming_delivery(state_root: Path):
     """Two-leg trip with tight transfer: cycle should emit connection_at_risk
     and flip the leg-2 marker so the next cycle does not re-fire."""
     leg1 = _make_state(
@@ -1482,9 +1531,9 @@ def test_connection_risk_pass_fires_and_persists_marker(state_root: Path):
     assert risk_events[0]["event"]["transfer_minutes_remaining"] == 30
     assert risk_events[0]["event"]["min_transfer_minutes"] == 45
 
-    # Marker persisted: next cycle should not re-fire
+    # A wake changes only the delivery retry deadline, never the phase flag.
     leg2_after = must(read_flight_state(2))
-    assert leg2_after["phase_markers"]["connection_at_risk_fired"] is True
+    assert leg2_after["phase_markers"]["connection_at_risk_fired"] is False
 
     with patch("precheck.ByAirClient.from_env"):
         events_second = precheck._run_cycle(now_utc=fake_now)
@@ -1823,7 +1872,1336 @@ def test_connection_risk_fires_when_leg2_is_beyond_poll_horizon(state_root: Path
     assert len(risk_events) == 1
     assert risk_events[0]["flight_id"] == 2
     assert risk_events[0]["event"]["transfer_minutes_remaining"] == 30
-    # leg-2 marker flipped by the risk pass, but it was never polled.
+    # Leg 2 remains unnotified until a real send is acknowledged.
     leg2_after = must(read_flight_state(2))
-    assert leg2_after["phase_markers"]["connection_at_risk_fired"] is True
+    assert leg2_after["phase_markers"]["connection_at_risk_fired"] is False
     assert leg2_after["last_snapshot"] is None
+
+
+def test_the_origin_trusts_a_flight_polled_earlier_in_the_cycle(state_root: Path, monkeypatch):
+    """#337 review: when the time-to-leave origin resolves, a flight the loop
+    already polled this cycle counts on its fresh, live times."""
+    markers = _phase_markers()
+    markers["day_before_fired"] = True
+    markers["time_to_leave_fired"] = True  # flight 2 is the one that asks
+    write_flight_state(
+        _make_state(
+            flight_id=1,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=_scheduled_snapshot(),
+            phase_markers=markers,
+        )
+    )
+    _fired_flight(2)
+    write_active_flights([1, 2])
+    seen: list = []
+
+    def home(address, *, now, transports):
+        seen.extend(transports)
+        return "12 Example St"
+
+    monkeypatch.setattr(precheck, "resolve_effective_home", home)
+    monkeypatch.setattr(precheck, "_maybe_maps_client", lambda: _NoRouteMaps())
+
+    def flight(flight_id):
+        raw = _byair_flight(
+            flight_id=flight_id,
+            dep_time="2026-05-18T12:30:00+00:00" if flight_id == 1 else "2026-05-18T17:00:00+00:00",
+        )
+        raw["depAirport"] = {"id": 20, "code": "BNA", "name": "Nashville"}
+        raw["arrAirport"] = {"id": 28, "code": "LGA", "name": "LaGuardia"}
+        return raw
+
+    with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
+        mock_byair_from_env.return_value.get_flight.side_effect = lambda flight_id: flight(
+            flight_id
+        )
+        precheck._run_cycle(
+            now_utc=datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC),
+            operator_tz_reader=_CountingReader(_CHICAGO),
+        )
+    departs = sorted(t.departs for t in seen)
+    assert datetime(2026, 5, 18, 12, 30, tzinfo=UTC) in departs
+
+
+def test_a_later_flight_byair_drops_never_reaches_the_origin(state_root: Path, monkeypatch):
+    """#337 review: flight 1 resolves the origin before flight 2, due this cycle
+    and higher in the loop, answers 404. Flight 2's stored snapshot is not live
+    state when the origin freezes, so it never places him."""
+    _fired_flight(1)  # due, and the one that asks for the origin
+    markers = _phase_markers()
+    markers["day_before_fired"] = True
+    markers["time_to_leave_fired"] = True
+    write_flight_state(
+        _make_state(
+            flight_id=2,
+            last_polled_at="2026-05-18T15:00:00Z",
+            scheduled_dep_time="2026-05-18T19:00:00+00:00",
+            scheduled_arr_time="2026-05-18T21:00:00+00:00",
+            last_snapshot={
+                **_scheduled_snapshot(),
+                "dep_airport_code": "LGA",
+                "arr_airport_code": "BNA",
+            },
+            phase_markers=markers,
+        )
+    )
+    write_active_flights([1, 2])
+    seen: list = []
+
+    def home(address, *, now, transports):
+        seen.extend(transports)
+        return "12 Example St"
+
+    monkeypatch.setattr(precheck, "resolve_effective_home", home)
+    monkeypatch.setattr(precheck, "_maybe_maps_client", lambda: _NoRouteMaps())
+
+    def flight(flight_id):
+        if flight_id == 2:
+            raise precheck.ByAirError("not_found", "flight 2 is no longer tracked")
+        raw = _byair_flight(flight_id=1)
+        raw["depAirport"] = {"id": 20, "code": "BNA", "name": "Nashville"}
+        raw["arrAirport"] = {"id": 28, "code": "LGA", "name": "LaGuardia"}
+        return raw
+
+    with patch("precheck.ByAirClient.from_env") as mock_byair_from_env:
+        mock_byair_from_env.return_value.get_flight.side_effect = lambda flight_id: flight(
+            flight_id
+        )
+        events = precheck._run_cycle(
+            now_utc=datetime(2026, 5, 18, 16, 0, 0, tzinfo=UTC),
+            operator_tz_reader=_CountingReader(_CHICAGO),
+        )
+    removed = next(e for e in events if e["flight_id"] == 2)
+    assert removed["event"] == {"reason": "removed_upstream"}
+    assert isinstance(removed["notification_id"], str)
+    assert seen and all(t.origin != "LGA" for t in seen)
+
+
+class _NoRouteMaps:
+    """A maps client whose every route fails, after the origin is asked for."""
+
+    def travel_time(self, *, origin, destination):
+        raise precheck.MapsError("ZERO_RESULTS", "no route")
+
+
+def test_undelivered_boarding_retries_while_boarding_continues(state_root):
+    markers = _phase_markers()
+    markers.update(day_before_fired=True, gate_assignment_fired=True, time_to_leave_fired=True)
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=_scheduled_snapshot(),
+            phase_markers=markers,
+        )
+    )
+    write_active_flights([12345])
+    now = datetime(2026, 5, 18, 16, 31, tzinfo=UTC)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _boarding_now_flight()
+        first = precheck._run_cycle(now_utc=now)
+        first_boarding = next(e for e in first if e["event"]["reason"] == "boarding_started")
+        retry = precheck._run_cycle(now_utc=now + timedelta(minutes=5))
+    retry_boarding = next(e for e in retry if e["event"]["reason"] == "boarding_started")
+    assert first_boarding["notification_id"] == retry_boarding["notification_id"]
+    assert must(read_flight_state(12345))["phase_markers"]["boarding_fired"] is False
+    with notification_store(now_utc=now + timedelta(minutes=5)) as delivery:
+        delivery.confirm([retry_boarding["notification_id"]])
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _boarding_now_flight()
+        assert not any(
+            e["event"]["reason"] == "boarding_started"
+            for e in precheck._run_cycle(now_utc=now + timedelta(minutes=10))
+        )
+    assert must(read_flight_state(12345))["phase_markers"]["boarding_fired"] is True
+
+
+def test_legacy_consumed_boarding_is_not_replayed_or_imported_as_a_receipt(state_root):
+    markers = {name: True for name in _phase_markers()}
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=_scheduled_snapshot(),
+            phase_markers=markers,
+        )
+    )
+    write_active_flights([12345])
+    now = datetime(2026, 5, 18, 16, 31, tzinfo=UTC)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _boarding_now_flight()
+        events = precheck._run_cycle(now_utc=now)
+    assert not any(event["event"]["reason"] == "boarding_started" for event in events)
+    assert must(read_flight_state(12345))["phase_markers"] == markers
+    with notification_store(now_utc=now) as store:
+        assert store.confirmed_markers(12345) == set()
+
+
+def test_snapshot_write_failure_keeps_the_notice_for_the_next_owner_run(state_root):
+    prior = _make_state(
+        flight_id=12345,
+        last_polled_at="2026-05-18T15:00:00Z",
+        last_snapshot=_scheduled_snapshot(),
+        phase_markers=_phase_markers(),
+    )
+    write_flight_state(prior)
+    before = must(read_flight_state(12345))
+    write_active_flights([12345])
+    now = datetime(2026, 5, 18, 16, 31, tzinfo=UTC)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _boarding_now_flight()
+        with patch("precheck.write_flight_state", side_effect=OSError("disk unavailable")):
+            with pytest.raises(OSError, match="disk unavailable"):
+                precheck._run_cycle(now_utc=now)
+        assert read_flight_state(12345) == before
+        with notification_store(now_utc=now) as store:
+            pending = next(
+                row
+                for row in store.data["notices"].values()
+                if row["event"]["reason"] == "boarding_started"
+            )
+            identity = pending["id"]
+            assert pending["confirmed_at"] is None
+        restarted = precheck._run_cycle(now_utc=now + timedelta(minutes=5))
+    notice = next(event for event in restarted if event["event"]["reason"] == "boarding_started")
+    assert notice["notification_id"] == identity
+    assert must(read_flight_state(12345))["phase_markers"]["boarding_fired"] is False
+
+
+@pytest.mark.parametrize("later_minutes", [28, 40])
+def test_pending_inbound_prediction_retries_only_the_exact_live_estimate(state_root, later_minutes):
+    markers = _phase_markers()
+    markers.update(day_before_fired=True, gate_assignment_fired=True, time_to_leave_fired=True)
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=_scheduled_snapshot(),
+            phase_markers=markers,
+        )
+    )
+    write_active_flights([12345])
+    now = datetime(2026, 5, 18, 16, 0, tzinfo=UTC)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _byair_flight(
+            inbound={"predicted_delay": {"delay_minutes": 25}}
+        )
+        first = precheck._run_cycle(now_utc=now)
+        old = next(e for e in first if e["event"]["reason"] == "inbound_delay_predicted")
+        assert old["event"]["predicted_time"] == "2026-05-18T17:25:00+00:00"
+        client.return_value.get_flight.return_value = _byair_flight(
+            inbound={"predicted_delay": {"delay_minutes": later_minutes}}
+        )
+        retry = precheck._run_cycle(now_utc=now + timedelta(minutes=5))
+        again = precheck._run_cycle(now_utc=now + timedelta(minutes=10))
+    predictions = [e for e in retry if e["event"]["reason"] == "inbound_delay_predicted"]
+    assert len(predictions) == 1
+    assert predictions[0]["event"]["delay_minutes"] == later_minutes
+    expected_departure = datetime(2026, 5, 18, 17, tzinfo=UTC) + timedelta(minutes=later_minutes)
+    assert predictions[0]["event"]["predicted_time"] == expected_departure.isoformat()
+    assert predictions[0]["notification_id"] != old["notification_id"]
+    assert [e for e in again if e["event"]["reason"] == "inbound_delay_predicted"] == predictions
+    with notification_store(now_utc=now + timedelta(minutes=10)) as store:
+        assert store.confirm([old["notification_id"]])["stale"] == [old["notification_id"]]
+
+
+@pytest.mark.parametrize("later_minutes,expected", [(10, 10), (0, None)])
+def test_pending_inbound_retraction_refreshes_its_exact_cleared_estimate(
+    state_root, later_minutes, expected
+):
+    markers = _phase_markers()
+    markers.update(day_before_fired=True, gate_assignment_fired=True, time_to_leave_fired=True)
+    snapshot = _scheduled_snapshot()
+    snapshot["inbound"]["predicted_delay_minutes"] = 95
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=snapshot,
+            phase_markers=markers,
+        )
+    )
+    write_active_flights([12345])
+    now = datetime(2026, 5, 18, 16, 0, tzinfo=UTC)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _byair_flight(
+            inbound={"predicted_delay": {"delay_minutes": 5}}
+        )
+        first = precheck._run_cycle(now_utc=now)
+        old = next(e for e in first if e["event"]["reason"] == "inbound_delay_retracted")
+        client.return_value.get_flight.return_value = _byair_flight(
+            inbound={"predicted_delay": {"delay_minutes": later_minutes}}
+        )
+        retry = precheck._run_cycle(now_utc=now + timedelta(minutes=5))
+    retractions = [e for e in retry if e["event"]["reason"] == "inbound_delay_retracted"]
+    assert len(retractions) == 1
+    assert retractions[0]["event"]["new_delay_minutes"] == expected
+    assert retractions[0]["event"]["prev_delay_minutes"] == 95
+    assert retractions[0]["notification_id"] != old["notification_id"]
+    with notification_store(now_utc=now + timedelta(minutes=5)) as store:
+        assert store.confirm([old["notification_id"]])["stale"] == [old["notification_id"]]
+
+
+@pytest.mark.parametrize(
+    "later_time,minutes",
+    [
+        ("2026-05-18T17:40:00+00:00", 40),
+        ("2026-05-18T17:20:00+00:00", 20),
+        ("2026-05-18T17:00:00+00:00", None),
+    ],
+)
+def test_pending_delay_uses_its_undelivered_baseline_after_small_drift(
+    state_root, later_time, minutes
+):
+    snapshot = _scheduled_snapshot()
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=snapshot,
+            phase_markers={name: True for name in _phase_markers()},
+        )
+    )
+    write_active_flights([12345])
+    now = datetime(2026, 5, 18, 16, 0, tzinfo=UTC)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _byair_flight(
+            dep_time="2026-05-18T17:30:00+00:00"
+        )
+        first = precheck._run_cycle(now_utc=now)
+        old = next(e for e in first if e["event"]["reason"] == "delay")
+        client.return_value.get_flight.return_value = _byair_flight(dep_time=later_time)
+        retry = precheck._run_cycle(now_utc=now + timedelta(minutes=5))
+    delays = [e for e in retry if e["event"]["reason"] == "delay"]
+    if minutes is None:
+        assert delays == []
+    else:
+        assert len(delays) == 1
+        assert delays[0]["event"]["delay_minutes"] == minutes
+        assert delays[0]["event"]["new_dep_time"] == later_time
+    with notification_store(now_utc=now + timedelta(minutes=5)) as store:
+        assert store.confirm([old["notification_id"]])["stale"] == [old["notification_id"]]
+
+
+@pytest.mark.parametrize("baggage", ["5", None])
+def test_pending_carousel_refreshes_before_delivery_or_retracts_missing_data(state_root, baggage):
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=_scheduled_snapshot(),
+            phase_markers={name: True for name in _phase_markers()},
+        )
+    )
+    write_active_flights([12345])
+    now = datetime(2026, 5, 18, 16, 0, tzinfo=UTC)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _byair_flight(baggage="3")
+        old = next(
+            e
+            for e in precheck._run_cycle(now_utc=now)
+            if e["event"]["reason"] == "carousel_revealed"
+        )
+        client.return_value.get_flight.return_value = _byair_flight(baggage=baggage)
+        retry = precheck._run_cycle(now_utc=now + timedelta(minutes=5))
+    carousels = [e for e in retry if e["event"]["reason"] == "carousel_revealed"]
+    assert [e["event"]["baggage"] for e in carousels] == ([] if baggage is None else [baggage])
+    with notification_store(now_utc=now + timedelta(minutes=5)) as store:
+        assert store.confirm([old["notification_id"]])["stale"] == [old["notification_id"]]
+
+
+@pytest.mark.parametrize("gate", ["C3", "A1"])
+def test_pending_gate_changes_track_each_side_through_missing_values(state_root, gate):
+    snapshot = {**_scheduled_snapshot(), "dep_gate": "A1", "arr_gate": "A2"}
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=snapshot,
+            phase_markers={name: True for name in _phase_markers()},
+        )
+    )
+    write_active_flights([12345])
+    now = datetime(2026, 5, 18, 16, 0, tzinfo=UTC)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _byair_flight()
+        first = precheck._run_cycle(now_utc=now)
+        old = [e for e in first if e["event"]["reason"] == "gate_change"]
+        assert len(old) == 2
+        raw = _byair_flight(dep_gate=gate)
+        raw["arrGate"] = "D4"
+        client.return_value.get_flight.return_value = raw
+        retry = precheck._run_cycle(now_utc=now + timedelta(minutes=5))
+    changes = [e["event"] for e in retry if e["event"]["reason"] == "gate_change"]
+    expected = [{"reason": "gate_change", "side": "arr", "from": "A2", "to": "D4"}]
+    if gate != "A1":
+        expected.append({"reason": "gate_change", "side": "dep", "from": "A1", "to": gate})
+    assert sorted(changes, key=lambda e: e["side"]) == sorted(expected, key=lambda e: e["side"])
+    with notification_store(now_utc=now + timedelta(minutes=5)) as store:
+        assert store.confirm([e["notification_id"] for e in old])["stale"] == [
+            e["notification_id"] for e in old
+        ]
+
+
+@pytest.mark.parametrize("history", ["none", "forecast", "cleared"])
+def test_inbound_all_clear_refers_only_to_the_last_delivered_forecast(state_root, history):
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=_scheduled_snapshot(),
+            phase_markers={name: True for name in _phase_markers()},
+        )
+    )
+    write_active_flights([12345])
+    now = datetime(2026, 5, 18, 16, 0, tzinfo=UTC)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _byair_flight(
+            computed_status="check_in_open", inbound={"predicted_delay": {"delay_minutes": 25}}
+        )
+        first = precheck._run_cycle(now_utc=now)
+        first_prediction = next(
+            e for e in first if e["event"]["reason"] == "inbound_delay_predicted"
+        )
+        if history != "none":
+            with notification_store(now_utc=now) as store:
+                store.confirm([first_prediction["notification_id"]])
+        if history == "cleared":
+            client.return_value.get_flight.return_value = _byair_flight(
+                computed_status="check_in_open", inbound={"predicted_delay": {"delay_minutes": 0}}
+            )
+            cleared = precheck._run_cycle(now_utc=now + timedelta(minutes=5))
+            notice = next(e for e in cleared if e["event"]["reason"] == "inbound_delay_retracted")
+            with notification_store(now_utc=now + timedelta(minutes=5)) as store:
+                store.confirm([notice["notification_id"]])
+        client.return_value.get_flight.return_value = _byair_flight(
+            computed_status="check_in_open", inbound={"predicted_delay": {"delay_minutes": 40}}
+        )
+        changed = precheck._run_cycle(now_utc=now + timedelta(minutes=10))
+        pending = next(e for e in changed if e["event"]["reason"] == "inbound_delay_predicted")
+        client.return_value.get_flight.return_value = _byair_flight(
+            computed_status="check_in_open", inbound={"predicted_delay": {"delay_minutes": 0}}
+        )
+        recovered = precheck._run_cycle(now_utc=now + timedelta(minutes=15))
+    notices = [e for e in recovered if e["event"]["reason"] == "inbound_delay_retracted"]
+    if history == "forecast":
+        assert len(notices) == 1
+        assert notices[0]["event"]["prev_delay_minutes"] == 25
+        assert notices[0]["event"]["new_delay_minutes"] is None
+    else:
+        assert notices == []
+    with notification_store(now_utc=now + timedelta(minutes=15)) as store:
+        assert store.confirm([pending["notification_id"]])["stale"] == [pending["notification_id"]]
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+@pytest.mark.parametrize("duplicate_index", [True, False])
+def test_pending_removal_notice_follows_the_next_live_source_result(
+    state_root, recovers, duplicate_index
+):
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=_scheduled_snapshot(),
+            phase_markers={name: True for name in _phase_markers()},
+        )
+    )
+    write_active_flights([12345, 12345] if duplicate_index else [12345])
+    now = datetime(2026, 5, 18, 16, 0, tzinfo=UTC)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.side_effect = precheck.ByAirError("not_found", "missing")
+        first = precheck._run_cycle(now_utc=now)
+        removed = next(e for e in first if e["event"]["reason"] == "removed_upstream")
+        if recovers:
+            client.return_value.get_flight.side_effect = None
+            client.return_value.get_flight.return_value = _byair_flight()
+        retry = precheck._run_cycle(now_utc=now + timedelta(minutes=5))
+        assert client.return_value.get_flight.call_count == 2
+    notices = [e for e in retry if e["event"]["reason"] == "removed_upstream"]
+    if recovers:
+        assert notices == []
+        with notification_store(now_utc=now + timedelta(minutes=5)) as store:
+            assert store.confirm([removed["notification_id"]])["stale"] == [
+                removed["notification_id"]
+            ]
+    else:
+        assert notices == [removed]
+
+
+# ---------------------------------------------------------------------------
+# #349: _process_flight GPS presence via get_airport + current-location
+# ---------------------------------------------------------------------------
+
+# Live-sampled BNA coordinates from tests/test_byair_client.py BNA_AIRPORT
+# (`byair_get_airport(98)`). Nested get_flight.depAirport fixtures do not
+# carry lat/lon; presence must resolve through get_airport.
+_BNA_AIRPORT = {
+    "id": 98,
+    "name": "Nashville International Airport",
+    "code": "BNA",
+    "lat": 36.125247,
+    "lon": -86.677102,
+}
+_BNA_LAT = 36.125247
+_BNA_LON = -86.677102
+_NASHVILLE_DOWNTOWN_LAT = 36.1627
+_NASHVILLE_DOWNTOWN_LON = -86.7816
+
+
+class _ZeroTravelMaps:
+    def travel_time(self, *, origin, destination):
+        return type("TravelTime", (), {"in_traffic_seconds": 0, "duration_seconds": 0})()
+
+
+class _FixedTravelMaps:
+    """Maps stub answering `seconds`; with `clock`, each query costs `cost` s."""
+
+    def __init__(self, seconds: int, *, clock: dict | None = None, cost: float = 0.0):
+        self._seconds = seconds
+        self._clock = clock
+        self._cost = cost
+
+    def travel_time(self, *, origin, destination):
+        if self._clock is not None:
+            self._clock["t"] += self._cost
+        return type(
+            "TravelTime",
+            (),
+            {"in_traffic_seconds": self._seconds, "duration_seconds": self._seconds},
+        )()
+
+
+def _bna_flight(**overrides) -> dict:
+    raw = _byair_flight(**overrides)
+    raw["depAirport"] = {
+        "id": 98,
+        "code": "BNA",
+        "name": "Nashville International Airport",
+    }
+    return raw
+
+
+def _seed_leave_by_flight(
+    *,
+    last_snapshot: dict | None = None,
+    last_polled_at: str = "2026-05-18T15:00:00Z",
+    flight_id: int = 12345,
+    active: list[int] | None = None,
+    time_to_leave_fired: bool = False,
+) -> None:
+    markers = _phase_markers()
+    markers["day_before_fired"] = True
+    markers["time_to_leave_fired"] = time_to_leave_fired
+    snapshot = last_snapshot if last_snapshot is not None else _scheduled_snapshot()
+    write_flight_state(
+        _make_state(
+            flight_id=flight_id,
+            dep_airport_id=98,
+            last_polled_at=last_polled_at,
+            last_snapshot=snapshot,
+            phase_markers=markers,
+        )
+    )
+    write_active_flights(active if active is not None else [flight_id])
+    write_config({"home_address": "1 Example Street, Nashville, TN"})
+
+
+def _run_leave_by_cycle(now, *, gps=None, airport=_BNA_AIRPORT, monkeypatch, state_root):
+    monkeypatch.setattr(precheck, "_maybe_maps_client", lambda: _ZeroTravelMaps())
+    if gps is not None:
+        _write_current_location(
+            state_root,
+            latitude=gps[0],
+            longitude=gps[1],
+            captured_at=gps[2],
+        )
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _bna_flight()
+        client.return_value.get_airport.return_value = airport
+        events = precheck._run_cycle(now_utc=now)
+    return events, client.return_value
+
+
+@pytest.mark.parametrize("timeout_stage", ["open", "read"])
+@pytest.mark.parametrize("with_backup", [False, True])
+def test_maps_timeouts_defer_time_to_leave(
+    state_root: Path, monkeypatch, capsys, timeout_stage, with_backup
+):
+    _seed_leave_by_flight()
+    monkeypatch.setattr(precheck, "resolve_effective_home", lambda address, **kwargs: address)
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "test")
+    if with_backup:
+        monkeypatch.setenv("TOMTOM_API_KEY", "test")
+    else:
+        monkeypatch.delenv("TOMTOM_API_KEY", raising=False)
+    timeout = TimeoutError("maps timed out")
+    response = MagicMock()
+    response.__enter__.return_value.read.side_effect = timeout
+    with (
+        patch("precheck.ByAirClient.from_env") as byair,
+        patch(
+            "urllib.request.urlopen",
+            side_effect=timeout if timeout_stage == "open" else None,
+            return_value=response,
+        ) as urlopen,
+    ):
+        byair.return_value.get_flight.return_value = _bna_flight()
+        byair.return_value.get_airport.return_value = _BNA_AIRPORT
+        events = precheck._run_cycle(now_utc=datetime(2026, 5, 18, 16, 0, tzinfo=UTC))
+
+    assert urlopen.call_count == (2 if with_backup else 1)
+    assert all(event["event"]["reason"] != "time_to_leave" for event in events)
+    state = must(read_flight_state(12345))
+    assert state["phase_markers"]["time_to_leave_fired"] is False
+    error = capsys.readouterr().err
+    assert "maps timed out" in error
+    if with_backup:
+        assert "ALL_PROVIDERS_FAILED" in error
+
+
+def test_process_flight_fresh_gps_at_airport_stays_silent(state_root: Path, monkeypatch):
+    """Fresh GPS at BNA + documented get_airport coords → no time_to_leave."""
+    _seed_leave_by_flight()
+    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=UTC)
+    events, byair = _run_leave_by_cycle(
+        now,
+        gps=(_BNA_LAT, _BNA_LON, "2026-05-18T16:40:00Z"),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+    )
+    assert not any(e["event"]["reason"] == "time_to_leave" for e in events)
+    byair.get_airport.assert_called_once_with(98)
+    persisted = must(read_flight_state(12345))
+    assert persisted["last_snapshot"]["dep_lat"] == _BNA_LAT
+    assert persisted["last_snapshot"]["dep_lon"] == _BNA_LON
+
+
+def test_process_flight_prior_coords_still_require_a_live_airport_lookup(
+    state_root: Path, monkeypatch
+):
+    """Prior coordinates never replace live airport verification for suppression."""
+    cached = {
+        **_scheduled_snapshot(),
+        "dep_lat": _BNA_LAT,
+        "dep_lon": _BNA_LON,
+    }
+    _seed_leave_by_flight(last_snapshot=cached)
+    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=UTC)
+    events, byair = _run_leave_by_cycle(
+        now,
+        gps=(_BNA_LAT, _BNA_LON, "2026-05-18T16:40:00Z"),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+    )
+    assert not any(e["event"]["reason"] == "time_to_leave" for e in events)
+    byair.get_airport.assert_called_once_with(98)
+
+
+def test_process_flight_stale_or_absent_location_is_not_proof_away(state_root: Path, monkeypatch):
+    """Stale or missing GPS after leave_by is not proof the owner is away."""
+    _seed_leave_by_flight()
+    now = datetime(2026, 5, 18, 17, 4, 0, tzinfo=UTC)
+    monkeypatch.setattr(precheck, "_maybe_maps_client", lambda: _ZeroTravelMaps())
+    write_config({"home_address": "1 Example Street, Nashville, TN"})
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _bna_flight()
+        client.return_value.get_airport.return_value = _BNA_AIRPORT
+        absent = precheck._run_cycle(now_utc=now)
+    assert not any(e["event"]["reason"] == "time_to_leave" for e in absent)
+    client.return_value.get_airport.assert_not_called()
+
+    _seed_leave_by_flight()
+    _write_current_location(
+        state_root,
+        latitude=_NASHVILLE_DOWNTOWN_LAT,
+        longitude=_NASHVILLE_DOWNTOWN_LON,
+        captured_at="2026-05-18T16:00:00Z",  # 64 min stale at 17:04
+    )
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _bna_flight()
+        client.return_value.get_airport.return_value = _BNA_AIRPORT
+        stale = precheck._run_cycle(now_utc=now)
+    assert not any(e["event"]["reason"] == "time_to_leave" for e in stale)
+
+
+def _leave_by_events(
+    now: datetime,
+    raw: dict,
+    *,
+    monkeypatch,
+    state_root: Path,
+    travel_seconds: int = 0,
+    gps_captured_at: str | None = None,
+    gps: tuple[float, float] = (_NASHVILLE_DOWNTOWN_LAT, _NASHVILLE_DOWNTOWN_LON),
+) -> tuple[list[dict], MagicMock]:
+    """One real `_run_cycle` over the seeded state; the `time_to_leave` events
+    and the byAir client. Each caller owns its `state_root`, so no earlier
+    delivery can mask this cycle's notice."""
+    monkeypatch.setattr(precheck, "_maybe_maps_client", lambda: _FixedTravelMaps(travel_seconds))
+    if gps_captured_at is not None:
+        _write_current_location(
+            state_root, latitude=gps[0], longitude=gps[1], captured_at=gps_captured_at
+        )
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = raw
+        client.return_value.get_airport.return_value = _BNA_AIRPORT
+        events = precheck._run_cycle(now_utc=now)
+    # A silent result is only evidence when the flight was actually polled.
+    client.return_value.get_flight.assert_called_once()
+    leave_by = [e["event"] for e in events if e["event"]["reason"] == "time_to_leave"]
+    return leave_by, client.return_value
+
+
+def _status_flight(status: str, *, detail: str = "...", dep_time: str | None = None) -> dict:
+    raw = _bna_flight(computed_status=status)
+    raw["computed_status_detail"] = detail
+    if dep_time is not None:
+        raw["depTime"] = dep_time
+    return raw
+
+
+_AWAY_AT_1704 = "2026-05-18T17:00:00Z"
+
+
+def test_process_flight_fresh_away_late_scheduled_fires_missed(state_root: Path, monkeypatch):
+    """Fresh downtown GPS, 19 min after leave_by, documented `scheduled`: the
+    one missed notice, after a single airport-coordinate lookup."""
+    _seed_leave_by_flight()
+    fired, byair = _leave_by_events(
+        datetime(2026, 5, 18, 17, 4, tzinfo=UTC),
+        _status_flight("scheduled"),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        gps_captured_at=_AWAY_AT_1704,
+    )
+    assert [e["missed"] for e in fired] == [True]
+    byair.get_airport.assert_called_once_with(98)
+
+
+@pytest.mark.parametrize("status", ["", "   ", "departed"])
+def test_process_flight_fresh_away_late_non_predeparture_status_is_silent(
+    state_root: Path, monkeypatch, status: str
+):
+    """P9a: empty, whitespace and gone statuses are not proof the flight has
+    not left, so a late fire with clear-away GPS stays silent. Each case runs
+    alone in a fresh state root."""
+    _seed_leave_by_flight()
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 17, 4, tzinfo=UTC),
+        _status_flight(status),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        gps_captured_at=_AWAY_AT_1704,
+    )
+    assert fired == []
+
+
+def test_process_flight_reported_19_minute_seam_stays_silent(state_root: Path, monkeypatch):
+    """P1: the reported incident. Real boarding polls 2 min apart were
+    suppressed after leave_by 16:45 (travel 0); the 17:04 poll arrives with an
+    empty status and no location. It is not the first poll after leave_by and
+    carries neither away proof nor a documented status."""
+    _seed_leave_by_flight(
+        last_snapshot=_boarding_now_snapshot(), last_polled_at="2026-05-18T17:02:00Z"
+    )
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 17, 4, tzinfo=UTC),
+        _status_flight(""),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+    )
+    assert fired == []
+
+
+def test_process_flight_reported_19_minute_seam_with_away_gps_stays_silent(
+    state_root: Path, monkeypatch
+):
+    """N2c: the same empty-status poll with a fresh clear-away fix is still not
+    proof the flight has not left."""
+    _seed_leave_by_flight(
+        last_snapshot=_boarding_now_snapshot(), last_polled_at="2026-05-18T17:02:00Z"
+    )
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 17, 4, tzinfo=UTC),
+        _status_flight(""),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        gps_captured_at=_AWAY_AT_1704,
+    )
+    assert fired == []
+
+
+def test_process_flight_empty_status_29_minutes_late_stays_silent(state_root: Path, monkeypatch):
+    """P1b: travel 30 min (leave_by 16:15), the 16:44 poll reports an empty
+    status. The 10-minute scheduled cadence bound ended at 16:25."""
+    _seed_leave_by_flight(last_polled_at="2026-05-18T16:34:00Z")
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 16, 44, tzinfo=UTC),
+        _status_flight(""),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        travel_seconds=1800,
+    )
+    assert fired == []
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        pytest.param(_status_flight("check_in_open"), id="check-in-open"),
+        pytest.param(
+            _status_flight("boarding", detail="Boarding starts in 25 min"),
+            id="premature-boarding",
+        ),
+    ],
+)
+def test_process_flight_first_poll_after_leave_by_fires_when_cadence_tightens(
+    state_root: Path, monkeypatch, raw: dict
+):
+    """P2/P2b: the scheduled poll at 16:08 puts the next one at 16:18, the first
+    after leave_by 16:15. The new snapshot's 2-minute cadence must not turn that
+    poll into a missed one: the owner who has no location still gets the notice."""
+    _seed_leave_by_flight(last_polled_at="2026-05-18T16:08:00Z")
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 16, 18, tzinfo=UTC),
+        raw,
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        travel_seconds=1800,
+    )
+    assert [e["missed"] for e in fired] == [False]
+
+
+def test_process_flight_first_poll_after_leave_by_timely_without_status_flip(
+    state_root: Path, monkeypatch
+):
+    _seed_leave_by_flight(last_polled_at="2026-05-18T16:08:00Z")
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 16, 18, tzinfo=UTC),
+        _status_flight("scheduled"),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        travel_seconds=1800,
+    )
+    assert [e["missed"] for e in fired] == [False]
+
+
+def test_process_flight_flip_out_of_real_boarding_without_gps_is_silent(
+    state_root: Path, monkeypatch
+):
+    """P3/N1: a post-leave_by boarding poll at 16:40 already passed. The 16:42
+    flip back to `scheduled` after a delay is not the first poll after leave_by
+    16:35, and with no location there is no proof of being away."""
+    _seed_leave_by_flight(
+        last_snapshot=_boarding_now_snapshot(), last_polled_at="2026-05-18T16:40:00Z"
+    )
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 16, 42, tzinfo=UTC),
+        _status_flight("scheduled", dep_time="2026-05-18T17:45:00+00:00"),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        travel_seconds=600,
+    )
+    assert fired == []
+
+
+def test_process_flight_flip_out_of_real_boarding_with_away_gps_fires_missed(
+    state_root: Path, monkeypatch
+):
+    """N1b: the same flip with a fresh clear-away fix is a missed notice, not
+    timely copy for a late message."""
+    _seed_leave_by_flight(
+        last_snapshot=_boarding_now_snapshot(), last_polled_at="2026-05-18T16:40:00Z"
+    )
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 16, 42, tzinfo=UTC),
+        _status_flight("scheduled", dep_time="2026-05-18T17:45:00+00:00"),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        travel_seconds=600,
+        gps_captured_at="2026-05-18T16:38:00Z",
+    )
+    assert [e["missed"] for e in fired] == [True]
+
+
+def test_process_flight_loosened_cadence_cannot_widen_the_first_poll_window(
+    state_root: Path, monkeypatch
+):
+    """The prior `check_in_open` poll (2-min cadence) at 16:10 means 16:12 was the
+    next poll; 16:18 after leave_by 16:15 is an outage gap. The new snapshot's
+    10-minute `scheduled` cadence must not admit it as timely."""
+    _seed_leave_by_flight(
+        last_snapshot={**_scheduled_snapshot(), "computed_status": "check_in_open"},
+        last_polled_at="2026-05-18T16:10:00Z",
+    )
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 16, 18, tzinfo=UTC),
+        _status_flight("scheduled"),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        travel_seconds=1800,
+    )
+    assert fired == []
+
+
+def test_process_flight_outage_gap_after_leave_by_needs_away_proof(state_root: Path, monkeypatch):
+    """byAir was unreachable between the 16:00 poll and 16:50: the poll back is
+    long past the cadence that scheduled it (leave_by 16:15)."""
+    _seed_leave_by_flight(last_polled_at="2026-05-18T16:00:00Z")
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 16, 50, tzinfo=UTC),
+        _status_flight("scheduled"),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        travel_seconds=1800,
+    )
+    assert fired == []
+
+
+def test_process_flight_unrecognised_prior_status_has_no_timely_window(
+    state_root: Path, monkeypatch
+):
+    """A prior snapshot with an empty status cannot vouch for any cadence, so
+    16:18 (leave_by 16:15) is missed and silent without location. The poll is
+    due because an unpublished status falls to the ladder's 30-minute default."""
+    _seed_leave_by_flight(
+        last_snapshot={**_scheduled_snapshot(), "computed_status": ""},
+        last_polled_at="2026-05-18T15:48:00Z",
+    )
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 16, 18, tzinfo=UTC),
+        _status_flight("scheduled"),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        travel_seconds=1800,
+    )
+    assert fired == []
+
+
+def test_process_flight_never_polled_flight_is_missed_after_leave_by(state_root: Path, monkeypatch):
+    """sync_tripit seeds `last_polled_at` with no snapshot. The first real poll
+    lands after leave_by: no earlier poll exists to measure a cadence from, so
+    it is a missed notice and needs clear-away location."""
+    markers = _phase_markers()
+    markers["day_before_fired"] = True
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            dep_airport_id=98,
+            last_polled_at="2026-05-18T16:00:00Z",
+            last_snapshot=None,
+            phase_markers=markers,
+        )
+    )
+    write_active_flights([12345])
+    write_config({"home_address": "1 Example Street, Nashville, TN"})
+    fired, _ = _leave_by_events(
+        datetime(2026, 5, 18, 16, 20, tzinfo=UTC),
+        _status_flight("scheduled"),
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+        travel_seconds=1800,
+    )
+    assert fired == []
+
+
+# --- #349: the airport lookup is a third bounded call inside one flight ---
+
+_BUDGET_NOW = datetime(2026, 5, 18, 16, 45, tzinfo=UTC)
+_FRESH_AT_BNA = "2026-05-18T16:40:00Z"
+
+
+def _kill_limit() -> float:
+    return precheck._SCRIPT_KILL_BUDGET_SECONDS - precheck._INTERPRETER_TEARDOWN_HEADROOM_SECONDS
+
+
+def _budget_cycle(
+    state_root: Path,
+    monkeypatch,
+    *,
+    first_flight_seconds: float,
+    second_cached: bool,
+    gps: bool = True,
+    gps_captured_at: str = _FRESH_AT_BNA,
+    now: datetime = _BUDGET_NOW,
+    last_polled_at: str = "2026-05-18T15:00:00Z",
+    second_time_to_leave_fired: bool = False,
+    maps_configured: bool = True,
+) -> tuple[list[dict], MagicMock, dict]:
+    """Flight 1 polls slowly; flight 2 is due and may need the airport lookup.
+
+    Every byAir call and the Maps query advance one injected clock, so the
+    cycle's elapsed time is the simulated wall clock the 30 s kill compares to.
+    Flight 1 already fired its `time_to_leave`, so it never asks for a lookup.
+    """
+    clock = {"t": 0.0}
+    cached = {**_scheduled_snapshot(), "dep_lat": _BNA_LAT, "dep_lon": _BNA_LON}
+    _seed_leave_by_flight(
+        flight_id=1,
+        last_snapshot=cached,
+        last_polled_at=last_polled_at,
+        time_to_leave_fired=True,
+        active=[1, 2],
+    )
+    _seed_leave_by_flight(
+        flight_id=2,
+        last_snapshot=cached if second_cached else None,
+        last_polled_at=last_polled_at,
+        time_to_leave_fired=second_time_to_leave_fired,
+        active=[1, 2],
+    )
+    if gps:
+        _write_current_location(
+            state_root, latitude=_BNA_LAT, longitude=_BNA_LON, captured_at=gps_captured_at
+        )
+
+    def get_flight(*, flight_id):
+        clock["t"] += (
+            first_flight_seconds if flight_id == 1 else precheck._BYAIR_CALL_TIMEOUT_SECONDS
+        )
+        return _bna_flight(flight_id=flight_id)
+
+    def get_airport(airport_id):
+        clock["t"] += precheck._BYAIR_CALL_TIMEOUT_SECONDS
+        return _BNA_AIRPORT
+
+    maps = _FixedTravelMaps(0, clock=clock, cost=8.0) if maps_configured else None
+    monkeypatch.setattr(precheck, "_maybe_maps_client", lambda: maps)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.side_effect = get_flight
+        client.return_value.get_airport.side_effect = get_airport
+        events = precheck._run_cycle(now_utc=now, monotonic=lambda: clock["t"])
+    return events, client.return_value, clock
+
+
+def test_flight_that_may_need_the_airport_lookup_defers_past_its_reserve(
+    state_root: Path, monkeypatch, capsys
+):
+    """P4: flight 1's slow poll ends at 9.9 s. Flight 2 is due with a fresh fix and
+    no cached coordinates, so it may pay get_flight + get_airport + Maps (24 s)
+    and would end at 33.9 s, past the 30 s kill. It defers to the next cycle
+    instead; its state is untouched and no alert is derived from the skipped
+    presence check."""
+    events, byair, clock = _budget_cycle(
+        state_root, monkeypatch, first_flight_seconds=9.9, second_cached=False
+    )
+    assert byair.get_flight.call_count == 1
+    byair.get_airport.assert_not_called()
+    assert clock["t"] <= _kill_limit()
+    assert [e for e in events if e["event"]["reason"] == "time_to_leave"] == []
+    assert must(read_flight_state(2))["last_polled_at"] == "2026-05-18T15:00:00Z"
+    assert "deferring 1 to next cycle" in capsys.readouterr().err
+
+
+def test_prior_airport_coordinates_keep_the_live_lookup_budget_reserve(
+    state_root: Path, monkeypatch
+):
+    _, byair, clock = _budget_cycle(
+        state_root, monkeypatch, first_flight_seconds=9.9, second_cached=True
+    )
+    assert byair.get_flight.call_count == 1
+    byair.get_airport.assert_not_called()
+    assert clock["t"] == pytest.approx(9.9)
+    assert clock["t"] <= _kill_limit()
+
+
+def test_flight_with_budget_left_looks_up_the_airport_and_stays_silent_there(
+    state_root: Path, monkeypatch
+):
+    """Flight 1 ends at 1 s, inside the lookup flight's reduced start deadline.
+    Flight 2 pays all three calls (25 s, inside the kill) and the fresh fix at
+    BNA suppresses the alert: the reserve defers a flight, it never skips the
+    lookup and lets a presence-less alert through."""
+    events, byair, clock = _budget_cycle(
+        state_root, monkeypatch, first_flight_seconds=1.0, second_cached=False
+    )
+    assert byair.get_flight.call_count == 2
+    byair.get_airport.assert_called_once_with(98)
+    assert clock["t"] == pytest.approx(21.0)
+    assert clock["t"] <= _kill_limit()
+    assert [e for e in events if e["event"]["reason"] == "time_to_leave"] == []
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        pytest.param({"second_time_to_leave_fired": True}, id="marker-already-fired"),
+        pytest.param(
+            {
+                "now": datetime(2026, 5, 18, 10, 0, tzinfo=UTC),
+                "gps_captured_at": "2026-05-18T09:55:00Z",
+                "last_polled_at": "2026-05-18T09:00:00Z",
+            },
+            id="departure-beyond-the-travel-query-window",
+        ),
+        pytest.param({"maps_configured": False}, id="maps-not-configured"),
+        pytest.param({"gps": False}, id="no-fresh-fix"),
+    ],
+)
+def test_airport_lookup_is_not_made_when_no_time_to_leave_can_fire(
+    state_root: Path, monkeypatch, case: dict
+):
+    """Outside the marker / window / fresh-fix / Maps gates the alert is silent
+    whatever presence says, so the lookup is neither made nor reserved for:
+    flight 2 starts at 9.9 s and polls."""
+    _, byair, _ = _budget_cycle(
+        state_root, monkeypatch, first_flight_seconds=9.9, second_cached=False, **case
+    )
+    assert byair.get_flight.call_count == 2
+    byair.get_airport.assert_not_called()
+
+
+def test_flight_needing_both_the_reader_and_the_lookup_is_not_starved(
+    state_root: Path, monkeypatch
+):
+    """An available operator zone is used even when presence needs a lookup."""
+    markers = _phase_markers()  # day_before not fired yet: the reader may spawn
+    write_flight_state(
+        _make_state(
+            flight_id=12345,
+            dep_airport_id=98,
+            last_polled_at="2026-05-18T15:00:00Z",
+            last_snapshot=_scheduled_snapshot(),
+            phase_markers=markers,
+        )
+    )
+    write_active_flights([12345])
+    write_config({"home_address": "1 Example Street, Nashville, TN"})
+    _write_current_location(
+        state_root, latitude=_BNA_LAT, longitude=_BNA_LON, captured_at=_FRESH_AT_BNA
+    )
+    clock = {"t": 0.0}
+    monkeypatch.setattr(
+        precheck, "_maybe_maps_client", lambda: _FixedTravelMaps(0, clock=clock, cost=8.0)
+    )
+    reader = _CountingReader(_CHICAGO)
+
+    def bounded_reader():
+        clock["t"] += precheck._READER_RESERVE_SECONDS
+        return reader()
+
+    def get_flight(*, flight_id):
+        clock["t"] += precheck._BYAIR_CALL_TIMEOUT_SECONDS
+        return _bna_flight()
+
+    def get_airport(airport_id):
+        clock["t"] += precheck._BYAIR_CALL_TIMEOUT_SECONDS
+        return _BNA_AIRPORT
+
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.side_effect = get_flight
+        client.return_value.get_airport.side_effect = get_airport
+        events = precheck._run_cycle(
+            now_utc=_BUDGET_NOW, monotonic=lambda: clock["t"], operator_tz_reader=bounded_reader
+        )
+    assert reader.calls == 1
+    client.return_value.get_airport.assert_called_once_with(98)
+    day_before = _day_before_events(events)
+    assert [(e["day_label"], e["day_label_tz"]) for e in day_before] == [
+        ("today", "America/Chicago")
+    ]
+    assert [e["event"] for e in events if e["event"]["reason"] == "time_to_leave"] == []
+    assert must(read_flight_state(12345))["last_polled_at"] != "2026-05-18T15:00:00Z"
+
+    assert clock["t"] == pytest.approx(25.0)
+    assert clock["t"] <= _kill_limit()
+
+
+def test_process_flight_get_flight_shape_without_nested_coords_does_not_invent(
+    state_root: Path, monkeypatch
+):
+    """The repository get_flight.depAirport shape (id/name/code only) is not
+    a coordinate source; presence waits for get_airport."""
+    _seed_leave_by_flight()
+    now = datetime(2026, 5, 18, 16, 45, 0, tzinfo=UTC)
+    events, byair = _run_leave_by_cycle(
+        now,
+        gps=(_BNA_LAT, _BNA_LON, "2026-05-18T16:40:00Z"),
+        airport={"id": 98, "code": "BNA", "name": "Nashville International Airport"},
+        monkeypatch=monkeypatch,
+        state_root=state_root,
+    )
+    byair.get_airport.assert_called_once_with(98)
+    persisted = must(read_flight_state(12345))
+    assert persisted["last_snapshot"].get("dep_lat") is None
+    ttl = [e["event"] for e in events if e["event"]["reason"] == "time_to_leave"]
+    assert len(ttl) == 1
+    assert ttl[0]["missed"] is False
+
+
+def test_budget_deferred_flight_runs_before_its_refreshed_predecessor_next_tick(
+    state_root: Path, monkeypatch
+):
+    # The first flight consumes the lookup window on every two-minute tick.
+    # Its successful refresh must give the still-old second flight priority.
+    _budget_cycle(state_root, monkeypatch, first_flight_seconds=9.9, second_cached=False)
+    before = must(read_flight_state(2))["last_polled_at"]
+    now = _BUDGET_NOW + timedelta(minutes=2)
+    clock = {"t": 0.0}
+    calls: list[int] = []
+
+    def get_flight(*, flight_id):
+        calls.append(flight_id)
+        clock["t"] += 6.0
+        return _bna_flight(flight_id=flight_id)
+
+    def get_airport(airport_id):
+        clock["t"] += 6.0
+        return _BNA_AIRPORT
+
+    monkeypatch.setattr(
+        precheck, "_maybe_maps_client", lambda: _FixedTravelMaps(0, clock=clock, cost=8.0)
+    )
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.side_effect = get_flight
+        client.return_value.get_airport.side_effect = get_airport
+        events = precheck._run_cycle(now_utc=now, monotonic=lambda: clock["t"])
+    assert calls[0] == 2
+    assert must(read_flight_state(2))["last_polled_at"] != before
+    assert clock["t"] <= _kill_limit()
+    assert [e for e in events if e["event"]["reason"] == "time_to_leave"] == []
+
+
+def test_live_departure_airport_identity_replaces_the_prior_airport_for_presence(
+    state_root: Path, monkeypatch
+):
+    cached = {**_scheduled_snapshot(), "dep_lat": _BNA_LAT, "dep_lon": _BNA_LON}
+    _seed_leave_by_flight(last_snapshot=cached)
+    raw = _bna_flight()
+    raw["depAirport"]["id"] = 777
+    now = datetime(2026, 5, 18, 17, 4, tzinfo=UTC)
+    _write_current_location(
+        state_root, latitude=_BNA_LAT, longitude=_BNA_LON, captured_at="2026-05-18T17:00:00Z"
+    )
+    monkeypatch.setattr(precheck, "_maybe_maps_client", lambda: _FixedTravelMaps(0))
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = raw
+        client.return_value.get_airport.return_value = {"lat": 40.0, "lon": -105.0}
+        events = precheck._run_cycle(now_utc=now)
+    client.return_value.get_airport.assert_called_once_with(777)
+    assert [e["event"]["missed"] for e in events if e["event"]["reason"] == "time_to_leave"] == [
+        True
+    ]
+    assert must(read_flight_state(12345))["last_snapshot"]["dep_lat"] == 40.0
+
+
+def test_failed_live_airport_lookup_does_not_turn_prior_coords_into_away_proof(
+    state_root: Path, monkeypatch
+):
+    cached = {**_scheduled_snapshot(), "dep_lat": 40.0, "dep_lon": -105.0}
+    _seed_leave_by_flight(last_snapshot=cached)
+    now = datetime(2026, 5, 18, 17, 4, tzinfo=UTC)
+    _write_current_location(
+        state_root, latitude=_BNA_LAT, longitude=_BNA_LON, captured_at="2026-05-18T17:00:00Z"
+    )
+    monkeypatch.setattr(precheck, "_maybe_maps_client", lambda: _FixedTravelMaps(0))
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _bna_flight()
+        client.return_value.get_airport.side_effect = urllib.error.URLError("fixture unavailable")
+        events = precheck._run_cycle(now_utc=now)
+    client.return_value.get_airport.assert_called_once_with(98)
+    assert not any(e["event"]["reason"] == "time_to_leave" for e in events)
+
+
+def test_precheck_real_maps_fallback_fits_the_reserved_aggregate_budget(monkeypatch):
+    monkeypatch.setenv("GOOGLE_MAPS_API_KEY", "synthetic-key")
+    monkeypatch.setenv("TOMTOM_API_KEY", "synthetic-key")
+    elapsed = {"t": 0.0}
+    requests: list[float] = []
+
+    def get_json(url, timeout):
+        requests.append(timeout)
+        elapsed["t"] += timeout
+        if len(requests) == 1:
+            return {"status": "REQUEST_DENIED", "error_message": "synthetic Google failure"}
+        if len(requests) in {2, 3}:
+            return {"results": [{"position": {"lat": 36.0, "lon": -86.0}}]}
+        return {"routes": [{"summary": {"travelTimeInSeconds": 60, "lengthInMeters": 1000}}]}
+
+    with patch("maps_client._get_json", side_effect=get_json):
+        maps = precheck._maybe_maps_client()
+        assert maps is not None
+        result = maps.travel_time("Origin Street", "Destination Airport")
+    assert result.source == "tomtom"
+    assert result.duration_seconds == 60
+    assert len(requests) == 4
+    assert elapsed["t"] <= precheck._MAPS_CALL_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize("initial", [None, "away", "airport"])
+def test_one_location_snapshot_drives_presence_and_routing_when_host_replaces_it(
+    state_root: Path, monkeypatch, initial
+):
+    _seed_leave_by_flight()
+    now = datetime(2026, 5, 18, 17, 4, tzinfo=UTC)
+    old = (
+        (_NASHVILLE_DOWNTOWN_LAT, _NASHVILLE_DOWNTOWN_LON)
+        if initial == "away"
+        else (_BNA_LAT, _BNA_LON)
+    )
+    if initial is not None:
+        _write_current_location(
+            state_root, latitude=old[0], longitude=old[1], captured_at="2026-05-18T17:00:00Z"
+        )
+    maps = _FixedTravelMaps(0)
+    origins: list[str] = []
+    original_query = maps.travel_time
+
+    def query(*, origin, destination):
+        origins.append(origin)
+        return original_query(origin=origin, destination=destination)
+
+    monkeypatch.setattr(maps, "travel_time", query)
+    monkeypatch.setattr(precheck, "_maybe_maps_client", lambda: maps)
+
+    def get_flight(*, flight_id):
+        replacement = (
+            (_BNA_LAT, _BNA_LON)
+            if initial != "airport"
+            else (_NASHVILLE_DOWNTOWN_LAT, _NASHVILLE_DOWNTOWN_LON)
+        )
+        _write_current_location(
+            state_root,
+            latitude=replacement[0],
+            longitude=replacement[1],
+            captured_at="2026-05-18T17:00:00Z",
+        )
+        return _bna_flight()
+
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.side_effect = get_flight
+        client.return_value.get_airport.return_value = _BNA_AIRPORT
+        events = precheck._run_cycle(now_utc=now)
+    expected = f"{old[0]},{old[1]}" if initial is not None else "1 Example Street, Nashville, TN"
+    assert origins == [expected]
+    assert client.return_value.get_airport.call_count == (0 if initial is None else 1)
+    leave_notices = [item for item in events if item["event"]["reason"] == "time_to_leave"]
+    assert bool(leave_notices) == (initial == "away")
+
+
+def test_failed_maps_poll_does_not_make_a_later_missed_notice_timely_without_away_proof(
+    state_root: Path, monkeypatch
+):
+    _seed_leave_by_flight()
+    first = datetime(2026, 5, 18, 16, 46, tzinfo=UTC)
+    maps = _FixedTravelMaps(0)
+    original = maps.travel_time
+    failed = True
+
+    def query(*, origin, destination):
+        nonlocal failed
+        if failed:
+            failed = False
+            raise precheck.MapsError("UNAVAILABLE", "synthetic transient map failure")
+        return original(origin=origin, destination=destination)
+
+    monkeypatch.setattr(maps, "travel_time", query)
+    monkeypatch.setattr(precheck, "_maybe_maps_client", lambda: maps)
+    with patch("precheck.ByAirClient.from_env") as client:
+        client.return_value.get_flight.return_value = _bna_flight()
+        before = precheck._run_cycle(now_utc=first)
+        after = precheck._run_cycle(now_utc=first + timedelta(minutes=10))
+    assert client.return_value.get_flight.call_count == 2
+    assert not any(item["event"]["reason"] == "time_to_leave" for item in before + after)

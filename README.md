@@ -22,7 +22,7 @@ runs every 30 minutes with failure/recovery alerts; healthy checks stay silent.
 
 [![tessl](https://img.shields.io/endpoint?url=https%3A%2F%2Fapi.tessl.io%2Fv1%2Fbadges%2Fjbaruch%2Fnanoclaw-travel)](https://tessl.io/registry/jbaruch/nanoclaw-travel)
 
-Actionable travel assistance for NanoClaw — byAir-powered flight notifications, travel-booking gap checks, and nightly TripIt sync. Replaces generic "21 minutes to departure" reminders with alerts that change behavior. Powered by [byAir](https://byairapp.com/mcp/) for flight data and Google Maps Distance Matrix for traffic-aware time-to-leave.
+Actionable travel assistance for NanoClaw — byAir-powered flight notifications, travel-booking gap checks, and nightly TripIt sync. Replaces generic "21 minutes to departure" reminders with alerts that change behavior. Powered by [byAir](https://byairapp.com/mcp/) for flight data and Google Maps Distance Matrix for traffic-aware time-to-leave, plus Geocoding for venue-radius matching.
 
 Per-chat overlay plugin. Install via NanoClaw's `containerConfig.additionalTiles` mechanism.
 
@@ -52,7 +52,7 @@ additionalTiles: ["jbaruch/nanoclaw-travel"]
 | Variable | Purpose | Where to get |
 |----------|---------|--------------|
 | `BYAIR_MCP_URL` | byAir streamable-HTTP MCP endpoint (includes API key) | https://byairapp.com/mcp/ — Pro subscription, personal MCP link |
-| `GOOGLE_MAPS_API_KEY` | Distance Matrix API key for time-to-leave | https://console.cloud.google.com/apis/credentials |
+| `GOOGLE_MAPS_API_KEY` | Maps API key with Distance Matrix and Geocoding enabled for routing/venue points | https://console.cloud.google.com/apis/credentials |
 
 Google Calendar access (boarding-block reconciliation, drive-block
 create/remove, calendar fetches) needs **no variable**: it calls the native
@@ -64,13 +64,15 @@ Optional:
 
 | Variable | Purpose |
 |----------|---------|
-| `TOMTOM_API_KEY` | Backup routing provider, used only when the Google Distance Matrix call fails; absent it, a Google failure propagates |
+| `TOMTOM_API_KEY` | Backup routing/geocoding provider with TomTom Search + Routing enabled; used when Google fails |
 
 Store all required credentials in OneCLI vault. Never commit. See [.env.example](.env.example) for the contract; GitHub Actions secrets configuration link is in its file header.
 
 ## Co-loaded plugin dependency
 
-`nightly-travel-sync`'s Gmail freshness fallback (`scripts/fetch-tripit-emails.py`) imports four shared Gmail helpers — `google-rest.py`, `gmail-ops.py`, `gmail-message.py`, `sanitize-email-body.py` — from **`jbaruch/nanoclaw-admin`**'s heartbeat skill, over the co-loaded `tessl__heartbeat` mount. So this plugin's `additionalTiles` must also carry `jbaruch/nanoclaw-admin` for that one branch to run; it fails closed with an actionable message otherwise, and no other capability here depends on it.
+`nightly-travel-sync`'s Gmail freshness fallback (`scripts/fetch-tripit-emails.py`) imports four shared Gmail helpers — `google-rest.py`, `gmail-ops.py`, `gmail-message.py`, `sanitize-email-body.py` — from **`jbaruch/nanoclaw-admin`**'s heartbeat skill, over the co-loaded `tessl__heartbeat` mount. So this plugin's `additionalTiles` must also carry `jbaruch/nanoclaw-admin` for that one branch to run; it fails closed with an actionable message otherwise.
+
+`drive-engine` optionally reads admin's **talk-prep** Prep holds (#381): a talk whose talk-prep `Prep` hold ends at its start gets a drive that arrives at the Prep start, and the notice says `(Prep; talk at HH:MM)`. It runs only talk-prep's declared read-only reader, `tessl__talk-prep/scripts/talk-prep.py --prep-window <event ID>`, from the fixed native mount, with a 15-second bound, and it never reads the owner fragment. Without talk-prep in the chat, drives keep arriving by the talk start, with one stderr line per sweep. A broken install or a failed read holds that talk's drive as it is rather than moving it. That includes a talk-prep from before admin 0.6.110, which has no `--prep-window` reader, so admin must be at least 0.6.110. [`prep_window.py`](skills/drive-engine/prep_window.py) documents the contract. Nothing else here depends on admin.
 
 Gmail is not this plugin's domain, so it depends on the one tested copy of the RFC822 MIME parser and the poison sanitizer rather than re-implementing them (`nanoclaw-orders` consumes them the same way). Calendar is different — this plugin owns its per-service clients, so `google_calendar_client.py` stays self-contained here.
 
@@ -83,14 +85,21 @@ Travel history is the same story. **`jbaruch/tripit-api`** ships the `using-trip
 | Dependency | Specifier | Renewal |
 |------------|-----------|---------|
 | `jbaruch/coding-policy` | `latest` | Covered by the Runtime-Managed Manifest carve-out in `coding-policy: dependency-management`. The plugin's `SessionStart` hook flags any `jbaruch/*` dep that is not `latest`. |
+| `jbaruch/nanoclaw-tesla` | `latest` | Supported cached-state/charging-estimate provider; Tesla0.3.0 supplies the verified compatible transport. Real vehicle/calendar acceptance remains Root-owned; same runtime-managed manifest contract. |
 | `finsi/codex-review` | pinned | Reviewed **quarterly**. Run `tessl outdated`, bump in its own PR. No scanner covers this manifest. Renovate has no Tessl datasource. See [renovate.json](renovate.json) for what it does cover. |
 
 ## Rules
 
+Explicit conference day windows add one grounded commute pair, venue-based outside appointments and checkout-aware departure origins; retained legacy attendance keeps its old semantics. See [attendance intake](skills/drive-engine/attendance-contract.md) for the three owner choices, cited agenda inputs and schema-2 rollout.
+
+EV-aware drive planning adds measured-energy charging time and earlier leave-by through the supported Tesla estimate provider. See [EV planning](skills/drive-engine/ev-planning-contract.md) for configuration, grounded destination charging and the producer/install acceptance hold. Unknown vehicle data retains legacy timing.
+
 | Rule | Summary |
 |------|---------|
 | [flight-data-locality](rules/flight-data-locality.md) | Viktor uses Flighty for cached flight data, TripIt for booked itineraries, and ExpertFlyer for availability; Reclaim changes require his chosen automation scope. byAir polling is disabled |
-| [operator-local-tz-phrasing](rules/operator-local-tz-phrasing.md) | Relative-date words ("today"/"tomorrow") in a surface are phrased against the operator's local date (via `read-current-tz.py`), not the container UTC clock; displayed airport clock times stay as-is |
+| [ev-drive-planning](rules/ev-drive-planning.md) | Scoped Tesla read/estimate lookup, grounded planner inputs and legacy fallback; grants no vehicle operation |
+| [operator-local-tz-phrasing](rules/operator-local-tz-phrasing.md) | Relative-date words ("today"/"tomorrow") in a surface are phrased against the operator's local date (via the core `current-tz` skill's `read-current-tz.py`), not the container UTC clock; displayed airport clock times stay as-is |
+| [travel-schedule-contract](rules/travel-schedule-contract.md) | Ownership, version and freshness contract for travel-schedule readers |
 
 ## Skills
 
@@ -99,7 +108,7 @@ Travel history is the same story. **`jbaruch/tripit-api`** ships the `using-trip
 | [flighty](skills/flighty/SKILL.md) | Read Viktor's cached Flighty flights, seats, connections, and statistics from the host snapshot. |
 | [reclaim-travel](skills/reclaim-travel/SKILL.md) | Read Reclaim settings, preview TripIt timezone segments, and inspect the hourly timezone-only sync. |
 | [travel-core](skills/travel-core/SKILL.md) | Shared library bundle (not user-invocable): hosts the cross-skill `trip_origin` (TripIt-over-home position/anchor resolution), `airport_lead` (clearance / post-arrival buffer policy), `trip_key` (the canonical per-trip identifier joining the travel DB to the drive engine's verdicts), `lodging` (the `Check-in:` / `Check-out:` discriminator), `addresses` (the read-only parse of the trusted profile's canonical `## Addresses` block), and `operator_tz` (the Python door to the core `current-tz` reader) modules so the other skills import one source of truth. |
-| [drive-engine](skills/drive-engine/SKILL.md) | Unified leg-based drive-block engine (#156). On a ~30-min sweep it plans airport drives from the byAir itinerary and meeting drives from the calendar, diffs both against the primary calendar, and **applies** the changes — creating / updating / deleting its own blocks. Suppresses drives that can't be made (connection airports, home meetings while travelling), renders in local time, and leaves legacy blocks for the operator. Also plans the getting-there legs of a trip you drive to rather than fly — home→hotel and back — deciding by the computed drive time and asking once when that is ambiguous (#231). Notifies the operator ONLY on a new meeting drive (which they can skip by replying "skip", enumerated by local index), a material (≥10%) drive-time change ("leave N min sooner/later"), or a drive-or-fly question (answered "drive" / "fly"); removes, airport-drive adds, lodging-drive adds, and routine re-times apply silently. Replaces the flight-assist airport-drive pass and drive-planner. |
+| [drive-engine](skills/drive-engine/SKILL.md) | EV charging-stop time with cumulative per-vehicle energy and grounded destination charging (#339); unavailable inputs retain legacy timing.  Unified leg-based drive-block engine (#156). On a ~30-min sweep it plans airport drives from the byAir itinerary and meeting drives from the calendar, diffs both against the primary calendar, and **applies** the changes — creating / updating / deleting its own blocks. Suppresses drives that can't be made (connection airports, home meetings while travelling), renders in local time, and leaves legacy blocks for the operator. A talk with a talk-prep Prep hold gets a drive that arrives at the Prep start (#381; see Co-loaded plugin dependency). After an inbound landing, an ongoing reachable meeting replaces airport→lodging with airport→venue and the return goes to lodging (#350). Also plans the getting-there legs of a trip you drive to rather than fly — home→hotel and back — deciding by the computed drive time and asking once when that is ambiguous (#231). Notifies the operator ONLY on a new meeting drive (which they can skip by replying "skip", enumerated by local index), a material (≥10%) drive-time change ("leave N min sooner/later"), or a drive-or-fly question (answered "drive" / "fly"); removes, airport-drive adds, lodging-drive adds, and routine re-times apply silently. Replaces the flight-assist airport-drive pass and drive-planner. |
 | [flight-assist](skills/flight-assist/SKILL.md) | Action router: diagnose credentials, set home base, or compose a user-facing notification from a precheck wake event (delay, gate change, cancellation, boarding, time-to-leave, carousel, day-before, arrival logistics, tracked-flight add/remove) |
 | [sync-tripit](skills/sync-tripit/SKILL.md) | Adaptive scheduler that fires the byAir → `active-flights.json` refresh on a precheck-gated 5-min cadence — responsive on flight days, idle between travel windows. Diagnostic-only LLM surface (the gate + sync happen in the precheck script) |
 | [check-travel-bookings](skills/check-travel-bookings/SKILL.md) | Checks upcoming trips for missing bookings (flights, hotels, accommodation) by reading the nightly-built `travel-db.json`. Reports gaps for all upcoming trips — no date limit. Supports snooze state. Silent when all bookings are complete or snoozed. Use when the user asks about upcoming travel plans, itinerary completeness, missing reservations, or TripIt trip status. |
@@ -113,7 +122,7 @@ The skill bundle includes executable scripts the agent invokes via the SKILL.md 
 - `scripts/check-env.py` — verifies BYAIR_MCP_URL and GOOGLE_MAPS_API_KEY are set (calendar access has no env var to check — see above)
 - `scripts/set-home-base.py` — persists home address to plugin config for time-to-leave queries
 - `scripts/get-flight-state.py` — fetches a flight's last-known snapshot to enrich notifications
-- `scripts/day-before-calendar.py` — lists the operator's calendar events around a flight for the day-before check, minus declined and cancelled ones, with times on the operator's clock
+- `scripts/day-before-calendar.py` — lists the operator's calendar events around a flight for the day-before check, minus declined and cancelled ones, with times on the operator's clock; marks flexible drop-in windows and omits those still reachable after landing
 - `expertflyer/scripts/expertflyer.py` — thin HTTP client for the ExpertFlyer API service, plus the `assess` sweep that ranks open seats against the one held (stdlib only)
 - `expertflyer/scripts/seat_quality.py` — the operator's seat preferences: the cabin ladder, the exit-row tiers, and whether an open seat beats the held one
 - `scripts/read-current-tz.py` — resolves the operator's `current_tz` from `tz_state` so surfaces phrase relative dates in the operator's local zone (see `operator-local-tz-phrasing` rule)
